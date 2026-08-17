@@ -1,5 +1,8 @@
-# clevis_encryption is installed into the molecule scenario's roles dir at test
-# time (galaxy git); source of truth is its own repo.
+# clevis_encryption is resolved into each molecule scenario's roles dir at test
+# time — galaxy-installed (a real dir) in CI, or a local symlink to the sibling
+# checkout for dev. Ignore BOTH forms in every scenario; only the self-symlink
+# (encrypted_storage_pool) is committed. Source of truth is its own repo.
+molecule/*/roles/clevis_encryption
 molecule/*/roles/clevis_encryption/
 
 # Molecule ephemeral state
@@ -9,3 +12,4 @@ __pycache__/
 
 # ansible-lint / galaxy local cache
 .ansible/
+.claude/

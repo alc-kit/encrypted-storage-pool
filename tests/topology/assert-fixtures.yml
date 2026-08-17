@@ -1,0 +1,13 @@
+---
+# Device-free harness: run the role's real topology + member-count guard
+# (tasks/validate-topology.yml) against injected synthetic values passed with
+# `-e @fixtures/<case>.json`. run.sh invokes this once per fixture and checks the
+# play's exit status: VALID fixtures must pass (rc 0), INVALID fixtures must fail
+# (rc != 0). No block devices, no root, no gathered facts.
+
+- name: "Topology guard — fixture harness"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: "Run the role's topology + count guard on the injected fixture"
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/validate-topology.yml"

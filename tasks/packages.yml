@@ -1,8 +1,17 @@
 ---
-# Install the backend userland. Both btrfs-progs and lvm2 are mainline Debian
-# packages — no out-of-tree module, no DKMS, so this is fast and robust.
+# Install the backend userland. btrfs-progs, lvm2 and thin-provisioning-tools are
+# all mainline Debian packages — no out-of-tree module, no DKMS, so this is fast
+# and robust. thin-provisioning-tools (thin_check et al.) is required to activate
+# a thin pool and is only a Recommends of lvm2, so pull it in explicitly when thin
+# provisioning is enabled.
 - name: "Install the storage backend userland ({{ encrypted_storage_pool_backend }})"
   ansible.builtin.apt:
-    name: "{{ 'btrfs-progs' if encrypted_storage_pool_backend == 'btrfs' else 'lvm2' }}"
+    name: "{{ _esp_backend_packages }}"
     state: present
     update_cache: true
+  vars:
+    _esp_backend_packages: >-
+      {{ ['btrfs-progs'] if encrypted_storage_pool_backend == 'btrfs'
+         else (['lvm2', 'thin-provisioning-tools']
+               if (encrypted_storage_pool_lvm_thin | default(false) | bool)
+               else ['lvm2']) }}

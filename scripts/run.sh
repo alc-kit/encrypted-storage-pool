@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run the encrypted_storage_pool Molecule 'vm' scenario locally.
+# Run an encrypted_storage_pool Molecule VM scenario locally.
 #
 # Why this wrapper exists
 # -----------------------
@@ -16,18 +16,20 @@
 #                        IP; the scenario forces system libvirt (qemu:///system).
 #
 # This script wires both, then hands off to molecule. It works from any cwd.
-# The 'vm' scenario is the only scenario; CI runs it for both backends (btrfs +
-# lvm) via a matrix — locally it defaults to the box's default backend.
+# Scenarios: 'vm' (default, 4-disk mirror) and 'raid10' (10-disk raid10; lvm
+# variant builds a thin pool). CI runs each for both backends (btrfs + lvm) via a
+# matrix — locally the backend defaults to btrfs unless $ESP_BACKEND is set.
 #
 # Usage
 # -----
-#   ./test/run.sh                 # full lifecycle: molecule test -s vm
-#   ./test/run.sh converge        # molecule converge -s vm  (iterate)
-#   ./test/run.sh verify          # molecule verify -s vm
-#   ./test/run.sh destroy         # molecule destroy -s vm   (clean up)
-#   ./test/run.sh login           # extra args pass through to molecule
+#   ./scripts/run.sh                 # full lifecycle: molecule test -s vm
+#   ./scripts/run.sh converge        # molecule converge -s vm  (iterate)
+#   ./scripts/run.sh verify          # molecule verify -s vm
+#   ./scripts/run.sh destroy         # molecule destroy -s vm   (clean up)
+#   ./scripts/run.sh login           # extra args pass through to molecule
 #
-#   MOLECULE_SCENARIO=vm ./test/run.sh     # override the scenario (default: vm)
+#   MOLECULE_SCENARIO=raid10 ./scripts/run.sh   # pick the scenario (default: vm)
+#   ESP_BACKEND=lvm ./scripts/run.sh            # pick the backend  (default: btrfs)
 #
 # Prerequisites (see README.md → Testing): libvirt + KVM + Vagrant +
 # vagrant-libvirt, your user in the `libvirt` group, nested virt enabled, and

@@ -29,12 +29,15 @@ env:
 
 jobs:
   molecule:
-    name: "molecule vm (${{ matrix.backend }}, libvirt/KVM)"
+    name: "molecule ${{ matrix.scenario }} (${{ matrix.backend }}, libvirt/KVM)"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        # vm     = 4-disk mirror boot test; raid10 = 10-disk raid10 (lvm variant
+        # exercises the thin-pool path). Both run for each backend.
+        scenario: [vm, raid10]
         backend: [btrfs, lvm]
     steps:
       - uses: actions/checkout@v5
@@ -84,13 +87,13 @@ jobs:
         # The molecule converge composes clevis_encryption (NBDE); install the
         # pinned version (requirements.yml) next to the committed self-symlink so
         # molecule's ANSIBLE_ROLES_PATH resolves both roles.
-        run: ansible-galaxy role install -r requirements.yml -p molecule/vm/roles
+        run: ansible-galaxy role install -r requirements.yml -p molecule/${{ matrix.scenario }}/roles
 
-      - name: "molecule test -s vm (backend=${{ matrix.backend }})"
+      - name: "molecule test -s ${{ matrix.scenario }} (backend=${{ matrix.backend }})"
         env:
           LIBVIRT_DEFAULT_URI: qemu:///system
           ESP_BACKEND: ${{ matrix.backend }}
         run: |
           vdir="$(python -c 'import molecule_plugins.vagrant as m; print(m.__file__)')"
           export ANSIBLE_LIBRARY="$(dirname "$vdir")/modules"
-          molecule test -s vm
+          molecule test -s ${{ matrix.scenario }}

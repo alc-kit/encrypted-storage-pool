@@ -28,10 +28,12 @@
       check_mode: false
 
     - name: "Btrfs | mkfs.btrfs across the crypt-* members"
-      # mirror -> raid1 (data+metadata); stripe -> single profile.
+      # mirror -> raid1 (data+metadata); stripe -> single; raid10 -> raid10.
       ansible.builtin.command: >-
         mkfs.btrfs -f -L {{ encrypted_storage_pool_name }}
-        {{ '-d raid1 -m raid1' if encrypted_storage_pool_topology == 'mirror' else '-d single -m single' }}
+        {{ {'mirror': '-d raid1 -m raid1',
+            'stripe': '-d single -m single',
+            'raid10': '-d raid10 -m raid10'}[encrypted_storage_pool_topology] }}
         {{ encrypted_storage_pool_devices_resolved | map('regex_replace', '^', '/dev/mapper/crypt-') | join(' ') }}
       when: encrypted_storage_pool_btrfs_exists.rc != 0
       changed_when: true

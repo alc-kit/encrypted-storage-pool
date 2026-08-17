@@ -1,15 +1,17 @@
 ---
-# Post-REBOOT assertions. Observe the REAL cross-role boot chain (boot 2):
-# clevis_encryption unlocked the disks from the EXTERNAL Tang, reached
-# clevis-luks-unlocked.target, and encrypted_storage_pool's assemble -> check ->
-# ready chain mounted the pool across the seam.
-- name: "Verify the split boot chain (clevis NBDE + encrypted_storage_pool), post-reboot"
+# Post-REBOOT assertions for the MULTI-DISK RAID10 scenario (boot 2). Same real
+# cross-role boot chain as the vm scenario (clevis unlocked all 10 disks from the
+# external Tang, reached clevis-luks-unlocked.target, and the assemble -> check ->
+# ready chain mounted the pool across the seam), PLUS raid10/thin-specific profile
+# assertions. Disk-count-agnostic: every per-disk loop derives from clevis_raw_disks.
+- name: "Verify the RAID10 split boot chain (clevis NBDE + encrypted_storage_pool), post-reboot"
   hosts: clevis-target
   become: true
   gather_facts: false
   vars:
     esp_mnt: "/srv/{{ encrypted_storage_pool_name | default('data') }}"
     esp_expected: /var/lib/esp-integrity.expected.sha256
+    esp_backend: "{{ encrypted_storage_pool_backend | default('btrfs') }}"
 
   tasks:
     - name: "Assert encrypted-storage-ready.target reached (the boot barrier)"  # noqa: command-instead-of-module
@@ -82,8 +84,7 @@
           <= assemble({{ _a }}) µs.
 
     - name: "Resolve the data mappers' persistent names (crypt-<uuid>)"
-      # Derived from the scenario's disk list (NOT hardcoded) so this verify works
-      # unchanged across the 4-disk vm and 10-disk raid10 scenarios.
+      # Derived from the scenario's 10-disk list, not hardcoded.
       ansible.builtin.command: "cryptsetup luksUUID /dev/{{ item }}"
       loop: "{{ clevis_raw_disks }}"
       register: _data_uuids
@@ -92,7 +93,7 @@
     - name: "Assert every data mapper is open under its persistent crypt-<uuid> name"
       # item.stdout is the LUKS UUID; the mapper MUST be crypt-<uuid> (persistent
       # naming, clevis >=v2.0.0), never the legacy crypt-<node>. A missing mapper
-      # here means the crypt-<uuid> naming contract regressed.
+      # here means a member did not unlock or the naming contract regressed.
       ansible.builtin.command: "cryptsetup status crypt-{{ item.stdout }}"
       loop: "{{ _data_uuids.results }}"
       changed_when: false
@@ -102,6 +103,42 @@
     - name: "Assert the pool is mounted at {{ esp_mnt }}"
       ansible.builtin.command: "mountpoint -q {{ esp_mnt }}"
       changed_when: false
+
+    # ── RAID10 profile assertions ────────────────────────────────────────────
+    - name: "RAID10 (btrfs) | read the filesystem profile"
+      ansible.builtin.command: "btrfs filesystem df {{ esp_mnt }}"
+      register: _esp_btrfs_df
+      changed_when: false
+      when: esp_backend == 'btrfs'
+
+    - name: "RAID10 (btrfs) | assert Data AND Metadata are both RAID10"
+      ansible.builtin.assert:
+        that:
+          - "'Data, RAID10' in _esp_btrfs_df.stdout"
+          - "'Metadata, RAID10' in _esp_btrfs_df.stdout"
+        fail_msg: "btrfs pool is not RAID10: {{ _esp_btrfs_df.stdout }}"
+        success_msg: "btrfs pool is RAID10 (data + metadata) across all members."
+      when: esp_backend == 'btrfs'
+
+    - name: "RAID10 (lvm) | read the LVM layout (including hidden sub-LVs)"
+      ansible.builtin.command: >-
+        lvs -a --noheadings -o lv_name,segtype,lv_layout
+        {{ encrypted_storage_pool_name }}
+      register: _esp_lvs
+      changed_when: false
+      when: esp_backend == 'lvm'
+
+    - name: "RAID10 (lvm) | assert a raid10 thin pool + thin 'data' volume exist"
+      # thin path: the pool's hidden data sub-LV is raid10, the pool is a thin-pool,
+      # and the user-facing 'data' volume is thin.
+      ansible.builtin.assert:
+        that:
+          - "'raid10' in _esp_lvs.stdout"
+          - "'thin-pool' in _esp_lvs.stdout"
+          - "'thin' in _esp_lvs.stdout"
+        fail_msg: "expected a raid10 thin pool + thin 'data' LV: {{ _esp_lvs.stdout }}"
+        success_msg: "LVM raid10 thin pool + thin 'data' volume present."
+      when: esp_backend == 'lvm'
 
     - name: "Assert real I/O on the pool survives the reboot (write + read back)"
       ansible.builtin.shell:
@@ -116,8 +153,8 @@
     - name: "Data integrity | ASSERT the payload written before reboot survived reboot + unlock"
       # sha256sum -c recomputes the on-pool payload and checks it against the digest
       # recorded on the (unencrypted) root fs BEFORE the reboot. Non-zero exit means
-      # the data did NOT survive the reboot/unlock byte-for-bit (or the pool/file is
-      # missing). This is the regression guard for the data-loss bug.
+      # the data did NOT survive reboot/unlock byte-for-bit (or the pool/file is
+      # missing) — the regression guard for the data-loss bug, now across 10 disks.
       ansible.builtin.command: "sha256sum -c {{ esp_expected }}"
       register: _esp_integrity
       changed_when: false
@@ -125,8 +162,9 @@
     - name: "PASS"
       ansible.builtin.debug:
         msg: >-
-          Tier-2 split boot chain PASSED ({{ encrypted_storage_pool_backend | default('btrfs') }})
-          — clevis unlocked the disks at boot from the external Tang,
-          clevis-luks-unlocked.target reached, encrypted_storage_pool mounted the pool
-          at {{ esp_mnt }} across the seam, real I/O round-trips, and
+          Tier-2 RAID10 boot chain PASSED ({{ esp_backend }},
+          {{ clevis_raw_disks | length }} disks) — clevis unlocked every disk at boot
+          from the external Tang, clevis-luks-unlocked.target reached,
+          encrypted_storage_pool assembled a RAID10 pool at {{ esp_mnt }} across the
+          seam, real I/O round-trips, payload survived the reboot, and
           encrypted-storage-ready.target is active.

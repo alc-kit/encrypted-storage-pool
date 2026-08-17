@@ -1,0 +1,112 @@
+---
+# Tier-2 MULTI-DISK VM test for encrypted_storage_pool on Vagrant + libvirt/KVM.
+#
+# Proves the role across a wide pool: clevis_encryption unlocks TEN encrypted
+# disks at boot from an EXTERNAL Tang, and encrypted_storage_pool assembles a
+# RAID10 pool across the clevis-luks-unlocked.target seam, surviving a reboot.
+#   - btrfs backend -> native raid10 profile.
+#   - lvm   backend -> raid10 thin pool + thin volume (exercises the lvm-thin
+#                      workload path; encrypted_storage_pool_lvm_thin=true).
+# Backend selected by $ESP_BACKEND (btrfs|lvm) so CI can matrix it. 1 GiB per disk
+# is enough to build + verify the pool (qcow2 is sparse). Rootless via the libvirt
+# group + qemu_use_session=false, cachier disabled.
+dependency:
+  name: galaxy
+
+driver:
+  name: vagrant
+  provider:
+    name: libvirt
+  cachier: disabled
+
+platforms:
+  - name: clevis-tang
+    box: debian/trixie64
+    memory: 1024
+    cpus: 1
+    provider_options:
+      qemu_use_session: false
+
+  - name: clevis-target
+    box: debian/trixie64
+    memory: 3072
+    cpus: 2
+    provider_options:
+      qemu_use_session: false
+    provider_raw_config_args:
+      - "storage :file, :size => '1G', :type => 'qcow2', :bus => 'virtio', :device => 'vdb'"
+      - "storage :file, :size => '1G', :type => 'qcow2', :bus => 'virtio', :device => 'vdc'"
+      - "storage :file, :size => '1G', :type => 'qcow2', :bus => 'virtio', :device => 'vdd'"
+      - "storage :file, :size => '1G', :type => 'qcow2', :bus => 'virtio', :device => 'vde'"
+      - "storage :file, :size => '1G', :type => 'qcow2', :bus => 'virtio', :device => 'vdf'"
+      - "storage :file, :size => '1G', :type => 'qcow2', :bus => 'virtio', :device => 'vdg'"
+      - "storage :file, :size => '1G', :type => 'qcow2', :bus => 'virtio', :device => 'vdh'"
+      - "storage :file, :size => '1G', :type => 'qcow2', :bus => 'virtio', :device => 'vdi'"
+      - "storage :file, :size => '1G', :type => 'qcow2', :bus => 'virtio', :device => 'vdj'"
+      - "storage :file, :size => '1G', :type => 'qcow2', :bus => 'virtio', :device => 'vdk'"
+
+provisioner:
+  name: ansible
+  env:
+    # Resolve both roles from the scenario's roles/ dir: encrypted_storage_pool via
+    # the committed self-symlink, clevis_encryption installed there by CI (galaxy).
+    ANSIBLE_ROLES_PATH: "${MOLECULE_SCENARIO_DIRECTORY}/roles"
+  config_options:
+    defaults:
+      interpreter_python: auto_silent
+    ssh_connection:
+      ssh_args: "-o AddKeysToAgent=no"
+  inventory:
+    host_vars:
+      clevis-target:
+        tang_servers:
+          - url: "http://{{ hostvars['clevis-tang'].ansible_host }}:7500"
+        clevis_raw_disks:
+          - vdb
+          - vdc
+          - vdd
+          - vde
+          - vdf
+          - vdg
+          - vdh
+          - vdi
+          - vdj
+          - vdk
+        clevis_curl_ip_version: auto
+        # Controller secrets dir (NOT /tmp itself — clevis chmods
+        # dirname(recovery_key_path) to 0700, which fails on /tmp). Same path as the
+        # vm scenario so prepare.yml can be shared (symlinked); scenarios run
+        # separately and prepare wipes any stale recovery key each run.
+        clevis_recovery_key_path: /tmp/molecule-esp-secrets/recovery-key.txt
+        clevis_vault_password_file: /tmp/molecule-esp-secrets/vault-pass
+        # clevis NBDE-only — encrypted_storage_pool owns the pool + storage units.
+        clevis_ensure_pool: false
+        clevis_install_zfs_packages: false
+        clevis_deploy_storage_units: false
+        # encrypted_storage_pool — RAID10 across all 10 crypt-<uuid> mappers.
+        # Backend from $ESP_BACKEND (CI matrix), default btrfs. lvm-thin is set
+        # true unconditionally: the lvm backend builds a raid10 thin pool + thin
+        # volume; the btrfs backend simply ignores it.
+        encrypted_storage_pool_backend: "${ESP_BACKEND:-btrfs}"
+        encrypted_storage_pool_name: data
+        encrypted_storage_pool_topology: raid10
+        encrypted_storage_pool_lvm_thin: true
+        # encrypted_storage_pool_devices is intentionally UNSET: pool members are
+        # derived from the crypt-<uuid> entries clevis_encryption (>=v2.0.0) writes
+        # to /etc/crypttab (the supported persistent-naming path).
+
+scenario:
+  # create -> prepare -> converge -> side_effect (REBOOT) -> verify. Idempotence
+  # omitted: one-shot provisioning + boot test, the reboot is the point.
+  test_sequence:
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - side_effect
+    - verify
+    - destroy
+
+verifier:
+  name: ansible

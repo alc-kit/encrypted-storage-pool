@@ -13,9 +13,11 @@ encrypted_storage_pool_backend: btrfs
 # Pool identity: btrfs filesystem LABEL / LVM volume-group name.
 encrypted_storage_pool_name: data
 
-# Redundancy: mirror | stripe.
-#   btrfs → mirror = raid1 (data+metadata); stripe = single profile.
-#   lvm   → mirror = --type raid1 -m1; stripe = --type striped.
+# Redundancy: mirror | stripe | raid10.
+#   btrfs → mirror = raid1 (data+metadata); stripe = single; raid10 = raid10.
+#   lvm   → mirror = --type raid1 -m1; stripe = --type striped; raid10 = --type raid10.
+# Member-count guards (tasks/validate-topology.yml): mirror/stripe need >=2 disks,
+# raid10 needs >=4 AND an even count (a stripe over 2-way mirrored pairs).
 encrypted_storage_pool_topology: mirror
 
 # Where the assembled filesystem is mounted (fstab noauto + a boot unit mounts it
@@ -34,3 +36,22 @@ encrypted_storage_pool_install_packages: true
 
 # DESTRUCTIVE: destroy an existing pool before (re-)creating.
 encrypted_storage_pool_destroy_existing: false
+
+# ── LVM thin provisioning (lvm backend only) ────────────────────────────────
+# When true, the lvm backend builds a thin POOL whose data LV carries the chosen
+# topology's RAID geometry (e.g. raid10), plus a thin volume on top, instead of a
+# plain linear/raid LV. The btrfs backend ignores these. thin-provisioning-tools
+# is installed automatically (packages.yml) when this is enabled.
+encrypted_storage_pool_lvm_thin: false
+
+# Extents for the thin pool's data LV. Leave VG headroom so `lvconvert` can carve
+# the pool metadata LV — do NOT set this to 100%FREE.
+encrypted_storage_pool_lvm_thin_pool_extents: "95%FREE"
+
+# Thin pool LV name. The user-facing volume stays 'data', so the mount source
+# (/dev/<vg>/data) is identical to the thick path.
+encrypted_storage_pool_lvm_thin_pool_name: "tpool"
+
+# Virtual size of the thin 'data' volume. Empty → match the pool's data size 1:1
+# (no over-provisioning). Set e.g. "4T" to deliberately over-provision.
+encrypted_storage_pool_lvm_thin_virtual_size: ""
