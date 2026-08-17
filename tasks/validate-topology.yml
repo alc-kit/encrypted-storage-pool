@@ -1,0 +1,47 @@
+---
+# Pure, device-free topology + member-count guard. Rejects INVALID pool setups
+# before any destructive mkfs/lvcreate runs. Inputs (both injectable, so this file
+# is unit-testable with no block devices, no root, no gathered facts):
+#
+#   encrypted_storage_pool_topology          mirror | stripe | raid10
+#   encrypted_storage_pool_devices_resolved  the resolved crypt-* member list
+#
+# tests/topology/ drives this file directly with synthetic values to prove both
+# VALID and INVALID combinations are handled. Order matters: the topology-name
+# assert runs first so the min-count lookup below never hits an unknown key.
+
+- name: "Validate topology | topology name is supported"
+  ansible.builtin.assert:
+    that: encrypted_storage_pool_topology in ['mirror', 'stripe', 'raid10']
+    fail_msg: >-
+      encrypted_storage_pool_topology must be 'mirror', 'stripe' or 'raid10'
+      (got '{{ encrypted_storage_pool_topology }}').
+    success_msg: "topology '{{ encrypted_storage_pool_topology }}' is valid"
+    quiet: true
+
+- name: "Validate topology | member count satisfies the topology minimum"
+  vars:
+    _esp_count: "{{ encrypted_storage_pool_devices_resolved | default([]) | length }}"
+    _esp_min: "{{ {'mirror': 2, 'stripe': 2, 'raid10': 4}[encrypted_storage_pool_topology] }}"
+  ansible.builtin.assert:
+    that: (_esp_count | int) >= (_esp_min | int)
+    fail_msg: >-
+      topology '{{ encrypted_storage_pool_topology }}' needs at least {{ _esp_min }}
+      member disk(s), but {{ _esp_count }} resolved
+      ({{ encrypted_storage_pool_devices_resolved | default([]) }}).
+    success_msg: >-
+      {{ _esp_count }} member(s) satisfy the {{ encrypted_storage_pool_topology }}
+      minimum ({{ _esp_min }})
+    quiet: true
+
+- name: "Validate topology | raid10 needs an EVEN member count (stripe of mirrored pairs)"
+  vars:
+    _esp_count: "{{ encrypted_storage_pool_devices_resolved | default([]) | length }}"
+  ansible.builtin.assert:
+    that: (_esp_count | int) % 2 == 0
+    fail_msg: >-
+      raid10 needs an EVEN number of member disks (a stripe over 2-way mirrors);
+      got {{ _esp_count }} ({{ encrypted_storage_pool_devices_resolved | default([]) }}).
+    success_msg: "raid10 member count {{ _esp_count }} is even"
+    quiet: true
+  when: encrypted_storage_pool_topology == 'raid10'

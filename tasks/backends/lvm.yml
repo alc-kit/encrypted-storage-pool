@@ -49,16 +49,67 @@
             {{ encrypted_storage_pool_devices_resolved | map('regex_replace', '^', '/dev/mapper/crypt-') | join(' ') }}
           changed_when: true
 
-        - name: "LVM | lvcreate the data LV ({{ encrypted_storage_pool_topology }})"
-          # mirror -> raid1 (-m1, one redundant copy); stripe -> striped across all PVs.
+        - name: "LVM | compute the topology's RAID geometry for lvcreate"
+          # mirror -> raid1 (-m1, one redundant copy); stripe -> striped across all
+          # PVs; raid10 -> striped over 2-way mirrors, so stripes = members / 2.
+          ansible.builtin.set_fact:
+            _esp_lvm_geometry: >-
+              {{ {'mirror': '--type raid1 -m1',
+                  'stripe': '--type striped -i ' ~ (encrypted_storage_pool_devices_resolved | length),
+                  'raid10': '--type raid10 -i ' ~ ((encrypted_storage_pool_devices_resolved | length) // 2)
+                 }[encrypted_storage_pool_topology] }}
+
+        # ── Thick (default): one data LV filling the VG ─────────────────────────
+        - name: "LVM | lvcreate the thick data LV, topology {{ encrypted_storage_pool_topology }}"
           ansible.builtin.command: >-
-            lvcreate -y -n data -l 100%FREE
-            {{ '--type raid1 -m1' if encrypted_storage_pool_topology == 'mirror'
-               else '--type striped -i ' ~ (encrypted_storage_pool_devices_resolved | length) }}
+            lvcreate -y -n data -l 100%FREE {{ _esp_lvm_geometry }}
             {{ encrypted_storage_pool_name }}
+          when: not (encrypted_storage_pool_lvm_thin | default(false) | bool)
           changed_when: true
 
-        - name: "LVM | mkfs.ext4 on the LV"
+        # ── Thin (encrypted_storage_pool_lvm_thin=true): RAID pool + thin volume ─
+        # The pool's data LV carries the topology geometry (e.g. raid10); lvconvert
+        # then turns it into a thin pool (carving metadata from the reserved VG
+        # headroom), and a thin 'data' volume is created on top — so the mount src
+        # (/dev/<vg>/data) is identical to the thick path.
+        - name: "LVM | thin | lvcreate the pool data LV, topology {{ encrypted_storage_pool_topology }}"
+          ansible.builtin.command: >-
+            lvcreate -y -n {{ encrypted_storage_pool_lvm_thin_pool_name }}
+            -l {{ encrypted_storage_pool_lvm_thin_pool_extents }} {{ _esp_lvm_geometry }}
+            {{ encrypted_storage_pool_name }}
+          when: encrypted_storage_pool_lvm_thin | default(false) | bool
+          changed_when: true
+
+        - name: "LVM | thin | convert the RAID LV into a thin pool (auto metadata)"
+          ansible.builtin.command: >-
+            lvconvert -y --type thin-pool
+            {{ encrypted_storage_pool_name }}/{{ encrypted_storage_pool_lvm_thin_pool_name }}
+          when: encrypted_storage_pool_lvm_thin | default(false) | bool
+          changed_when: true
+
+        - name: "LVM | thin | read the pool's data size (for a 1:1, non-overprovisioned volume)"
+          ansible.builtin.command: >-
+            lvs --noheadings --nosuffix --units b -o lv_size
+            {{ encrypted_storage_pool_name }}/{{ encrypted_storage_pool_lvm_thin_pool_name }}
+          register: encrypted_storage_pool_thin_pool_size
+          changed_when: false
+          when:
+            - encrypted_storage_pool_lvm_thin | default(false) | bool
+            - not (encrypted_storage_pool_lvm_thin_virtual_size | default('') | length > 0)
+
+        - name: "LVM | thin | lvcreate the thin data volume"
+          # Virtual size: explicit override if set, else match the pool 1:1.
+          ansible.builtin.command: >-
+            lvcreate -y --type thin -n data
+            --thinpool {{ encrypted_storage_pool_lvm_thin_pool_name }}
+            -V {{ (encrypted_storage_pool_lvm_thin_virtual_size | default('') | length > 0)
+                  | ternary(encrypted_storage_pool_lvm_thin_virtual_size,
+                            (encrypted_storage_pool_thin_pool_size.stdout | default('') | trim) ~ 'B') }}
+            {{ encrypted_storage_pool_name }}
+          when: encrypted_storage_pool_lvm_thin | default(false) | bool
+          changed_when: true
+
+        - name: "LVM | mkfs.ext4 on the data LV"
           ansible.builtin.command: >-
             mkfs.ext4 -F -L {{ encrypted_storage_pool_name }}
             /dev/{{ encrypted_storage_pool_name }}/data

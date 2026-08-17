@@ -37,6 +37,14 @@ if mount "$mnt" 2>/dev/null; then
   echo "assemble: mounted $mnt (lvm)"
   exit 0
 fi
+# A member's mapper may not have unlocked — retry with degraded activation so a
+# raid1/raid10 LV still comes up on its surviving legs (mirrors the btrfs -o
+# degraded path above; keeps the seam fail-degraded rather than fail-closed here).
+vgchange -ay --activationmode degraded "{{ encrypted_storage_pool_name }}" >/dev/null 2>&1 || true
+if mount "$mnt" 2>/dev/null; then
+  echo "assemble: mounted $mnt (lvm, DEGRADED)"
+  exit 0
+fi
 {% endif %}
 
 echo "assemble: FAILED to mount $mnt (insufficient members decrypted?)" >&2

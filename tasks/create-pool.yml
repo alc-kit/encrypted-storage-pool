@@ -26,6 +26,9 @@
       written crypt-* entries to /etc/crypttab first.
   when: (encrypted_storage_pool_devices_resolved | default([]) | length) == 0
 
+- name: "Ensure pool | validate the topology + member count before any mkfs"
+  ansible.builtin.include_tasks: validate-topology.yml
+
 - name: "Ensure pool | create + assemble ({{ encrypted_storage_pool_backend }})"
   ansible.builtin.include_tasks: "backends/{{ encrypted_storage_pool_backend }}.yml"
   vars:

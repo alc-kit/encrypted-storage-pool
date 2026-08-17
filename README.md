@@ -44,10 +44,23 @@ decides viability).
 
 ## Backends
 
-| `encrypted_storage_pool_backend` | create | topology `mirror` | topology `stripe` |
-|---|---|---|---|
-| `btrfs` | `mkfs.btrfs` across the mappers | `-d raid1 -m raid1` | `-d single -m single` |
-| `lvm` | pvcreate + vgcreate + lvcreate + `mkfs.ext4` | `--type raid1 -m1` | `--type striped -i N` |
+| `encrypted_storage_pool_backend` | create | `mirror` | `stripe` | `raid10` |
+|---|---|---|---|---|
+| `btrfs` | `mkfs.btrfs` across the mappers | `-d raid1 -m raid1` | `-d single -m single` | `-d raid10 -m raid10` |
+| `lvm` | pvcreate + vgcreate + lvcreate + `mkfs.ext4` | `--type raid1 -m1` | `--type striped -i N` | `--type raid10 -i N/2` |
+
+`raid10` is a stripe over 2-way mirrored pairs and requires **≥4 member disks and
+an even count** (validated up front by `tasks/validate-topology.yml`, which also
+enforces `mirror`/`stripe` ≥2 and rejects unknown topology names before any
+destructive `mkfs`/`lvcreate`). `mirror`/`stripe` require ≥2.
+
+### LVM thin provisioning
+
+Set `encrypted_storage_pool_lvm_thin: true` (lvm backend only) to build a **thin
+pool** whose data LV carries the chosen topology's RAID geometry (e.g. raid10),
+plus a thin `data` volume on top — the mount source stays `/dev/<vg>/data`, so it
+is a drop-in for the thick path. `thin-provisioning-tools` is installed
+automatically. The btrfs backend ignores the thin variables.
 
 ## Role variables
 
@@ -56,12 +69,16 @@ decides viability).
 | `encrypted_storage_pool_enabled` | `true` | Set `false` to make the role a no-op. |
 | `encrypted_storage_pool_backend` | `btrfs` | `btrfs` or `lvm`. |
 | `encrypted_storage_pool_name` | `data` | btrfs LABEL / LVM volume-group name. |
-| `encrypted_storage_pool_topology` | `mirror` | `mirror` or `stripe`. |
+| `encrypted_storage_pool_topology` | `mirror` | `mirror`, `stripe`, or `raid10` (raid10 needs ≥4 even disks). |
 | `encrypted_storage_pool_mountpoint` | `/srv/{{ name }}` | Mount point (fstab noauto). |
 | `encrypted_storage_pool_devices` | *(derived)* | Bare disk names (e.g. `[vdb, vdc]`). Unset → derived from `crypt-*` in `/etc/crypttab`. |
 | `encrypted_storage_pool_ensure` | `true` | Create/assemble the pool on every run. |
-| `encrypted_storage_pool_install_packages` | `true` | Install `btrfs-progs` / `lvm2`. |
+| `encrypted_storage_pool_install_packages` | `true` | Install `btrfs-progs` / `lvm2` (+ `thin-provisioning-tools` when thin). |
 | `encrypted_storage_pool_destroy_existing` | `false` | **Destructive.** Destroy an existing pool first. |
+| `encrypted_storage_pool_lvm_thin` | `false` | lvm backend: build a thin pool + thin volume (see below). |
+| `encrypted_storage_pool_lvm_thin_pool_extents` | `95%FREE` | Extents for the thin pool data LV (leaves VG headroom for metadata). |
+| `encrypted_storage_pool_lvm_thin_pool_name` | `tpool` | Thin pool LV name (the volume stays `data`). |
+| `encrypted_storage_pool_lvm_thin_virtual_size` | *(match pool)* | Thin volume virtual size; empty → 1:1 with the pool. |
 
 ## Usage
 
@@ -81,13 +98,27 @@ roles:
 
 ## Testing
 
-A `vm` Molecule scenario (Vagrant + libvirt/KVM) boots two VMs — an external Tang
-server and an encrypted target — applies `clevis_encryption` (NBDE-only) + this
-role, **reboots**, and asserts the real cross-role boot chain: mappers open,
-`clevis-luks-unlocked.target` reached, seam ordering held
-(`unlock ≤ unlocked.target ≤ assemble`), pool mounted, and real I/O round-trips.
-The `vm-tests` CI workflow runs it for **both backends** (btrfs + lvm) via a
-matrix (needs nested KVM). No DKMS — btrfs/lvm are mainline.
+**Device-free (tier-0, no VMs).** `tests/topology/run.sh` runs the real
+`validate-topology.yml` guard against synthetic fixtures and asserts that valid
+setups pass and invalid ones (unknown topology, too-few members, odd raid10) are
+rejected. Wired into the `CI` workflow next to yamllint/ansible-lint.
+
+**VM boot tests (tier-2, nested KVM).** Molecule scenarios boot two VMs — an
+external Tang server and an encrypted target — apply `clevis_encryption`
+(NBDE-only) + this role, **reboot**, and assert the real cross-role boot chain:
+mappers open under `crypt-<uuid>`, `clevis-luks-unlocked.target` reached, seam
+ordering held (`unlock ≤ unlocked.target ≤ assemble`), pool mounted, real I/O
+round-trips, and a payload written pre-reboot survives byte-for-bit.
+
+| scenario | disks | topology | notes |
+|---|---|---|---|
+| `vm` | 4 × 2 GiB | `mirror` | the baseline boot test |
+| `raid10` | 10 × 1 GiB | `raid10` | multi-disk; lvm variant builds a raid10 **thin pool** |
+
+The `vm-tests` CI workflow matrixes **both scenarios × both backends** (btrfs +
+lvm). Run locally with `./scripts/run.sh` (`vm`) or
+`MOLECULE_SCENARIO=raid10 ./scripts/run.sh`; pick the backend with `ESP_BACKEND`. No
+DKMS — btrfs/lvm are mainline.
 
 ## License
 
