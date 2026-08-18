@@ -37,6 +37,23 @@ encrypted_storage_pool_install_packages: true
 # DESTRUCTIVE: destroy an existing pool before (re-)creating.
 encrypted_storage_pool_destroy_existing: false
 
+# ── Degraded assembly (lvm backend) ─────────────────────────────────────────
+# When a member device is missing at boot (dead disk, or a mapper that never
+# unlocked), come up DEGRADED on the surviving copies instead of not coming up at
+# all — the behaviour a ZFS mirror gives you for free via `zpool import`.
+#
+# Needed because LVM refuses to activate a partial THIN POOL under its default
+# `activation_mode = "degraded"`; only `--activationmode partial` will, and that
+# mode is indiscriminate. So the assemble script escalates to `partial` ONLY after
+# /usr/local/sbin/encrypted-storage-redundancy-check confirms every extent still
+# has a surviving copy (every raid10 mirror pair keeps an image, mirrored metadata
+# keeps a leg, and nothing non-redundant is on a missing PV). If the loss is NOT
+# covered, the pool stays down and encrypted-storage-ready.target is never
+# reached — fail closed, deliberately.
+#
+# Set false to keep the old behaviour: a pool with any missing device stays down.
+encrypted_storage_pool_degraded_activation: true
+
 # ── LVM thin provisioning (lvm backend only) ────────────────────────────────
 # When true, the lvm backend builds a thin POOL whose data LV carries the chosen
 # topology's RAID geometry (e.g. raid10), plus a thin volume on top, instead of a

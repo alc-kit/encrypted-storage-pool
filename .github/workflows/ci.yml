@@ -47,6 +47,9 @@ jobs:
           ANSIBLE_ROLES_PATH: molecule/vm/roles
         run: ansible-lint
 
+      - name: Device-free redundancy-coverage gate tests
+        run: bash tests/redundancy/run.sh
+
       - name: Device-free topology guard tests
         # Runs the real tasks/validate-topology.yml against synthetic topology /
         # device-list fixtures — asserts valid setups pass and invalid ones (bad
