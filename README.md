@@ -42,6 +42,42 @@ fail-degraded, and fail-**closed** lives in the `check → ready` `Requires=` ch
 (a partial unlock can still bring up a `-o degraded` btrfs raid1; the check gate
 decides viability).
 
+### Degraded assembly (missing device at boot)
+
+If a member device is missing — a dead disk, or a mapper that never unlocked — the
+pool comes up **degraded on the surviving copies** rather than not coming up at
+all, matching what `zpool import` gives a ZFS mirror. btrfs retries with
+`mount -o degraded`; the lvm backend escalates in three steps:
+
+1. `vgchange -ay` — normal activation.
+2. `vgchange -ay --activationmode degraded` — enough for a plain raid1/raid10 LV.
+3. For a **thin pool**, neither of the above works: LVM refuses to activate a
+   partial thin pool in `degraded` mode (*"Refusing activation of partial LV …
+   Use '--activationmode partial' to override"*), so a raid10 thin pool that lost
+   one disk would stay down across a reboot even though every extent still has a
+   good copy. `partial` does activate it — but that mode is indiscriminate and
+   would equally activate a pool that has lost *every* copy of some region,
+   handing consumers a device with holes. So the escalation is **gated**:
+   `/usr/local/sbin/encrypted-storage-redundancy-check` inspects
+   `lvs -a -o lv_name,segtype,devices` first and only allows `partial` when every
+   raid10 mirror pair still keeps an image, mirrored metadata still keeps a leg,
+   and nothing non-redundant sits on a missing PV.
+
+Not covered → the pool stays down, `encrypted-storage-ready.target` is never
+reached, and consumers stay gated. That is deliberate: an uncovered loss is real
+data loss, and quietly activating a holed pool is worse than not starting.
+
+A degraded assembly logs a `WARNING … activating DEGRADED` line and tells the
+operator to replace and repair; the array does **not** self-heal. Set
+`encrypted_storage_pool_degraded_activation: false` to disable the escalation
+entirely (any missing device then keeps the pool down).
+
+Mirror-pair note for `raid10`: LVM builds it as MD's *near* layout with 2 copies,
+so partners are **adjacent** images — `(0,1)`, `(2,3)`, `(4,5)`… The coverage gate
+relies on that, and it is verified by failure injection at `-i 2` and `-i 5`
+(`tests/redundancy/`). It is observed behaviour rather than a documented LVM
+contract, so re-verify on a major LVM upgrade.
+
 ## Backends
 
 | `encrypted_storage_pool_backend` | create | `mirror` | `stripe` | `raid10` |
@@ -75,6 +111,7 @@ automatically. The btrfs backend ignores the thin variables.
 | `encrypted_storage_pool_ensure` | `true` | Create/assemble the pool on every run. |
 | `encrypted_storage_pool_install_packages` | `true` | Install `btrfs-progs` / `lvm2` (+ `thin-provisioning-tools` when thin). |
 | `encrypted_storage_pool_destroy_existing` | `false` | **Destructive.** Destroy an existing pool first. |
+| `encrypted_storage_pool_degraded_activation` | `true` | Come up DEGRADED when a device is missing but redundancy covers it (see [Degraded assembly](#degraded-assembly-missing-device-at-boot)). `false` → any missing device keeps the pool down. |
 | `encrypted_storage_pool_lvm_thin` | `false` | lvm backend: build a thin pool + thin volume (see below). |
 | `encrypted_storage_pool_lvm_thin_pool_extents` | `95%FREE` | Extents for the thin pool data LV (leaves VG headroom for metadata). |
 | `encrypted_storage_pool_lvm_thin_pool_name` | `tpool` | Thin pool LV name (the volume stays `data`). |
@@ -98,10 +135,18 @@ roles:
 
 ## Testing
 
-**Device-free (tier-0, no VMs).** `tests/topology/run.sh` runs the real
-`validate-topology.yml` guard against synthetic fixtures and asserts that valid
-setups pass and invalid ones (unknown topology, too-few members, odd raid10) are
-rejected. Wired into the `CI` workflow next to yamllint/ansible-lint.
+**Device-free (tier-0, no VMs).** Two suites, both wired into the `CI` workflow
+next to yamllint/ansible-lint:
+
+- `tests/topology/run.sh` runs the real `validate-topology.yml` guard against
+  synthetic fixtures and asserts that valid setups pass and invalid ones (unknown
+  topology, too-few members, odd raid10) are rejected.
+- `tests/redundancy/run.sh` drives the real
+  `files/encrypted-storage-redundancy-check` — the same bytes deployed to
+  `/usr/local/sbin` — against `lvs` output **captured from a live LVM** with real
+  devices removed, asserting that a covered loss (one disk per mirror pair, one
+  metadata leg, a lost pmspare) allows degraded activation while an uncovered one
+  (both members of a pair, both metadata legs, linear metadata) is refused.
 
 **VM boot tests (tier-2, nested KVM).** Molecule scenarios boot two VMs — an
 external Tang server and an encrypted target — apply `clevis_encryption`

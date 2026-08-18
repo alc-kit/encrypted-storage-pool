@@ -12,6 +12,16 @@
 # encrypted-storage-assemble Wants=/After= the seam (NOT Requires): the unlock is
 # fail-degraded; fail-closed lives in the check -> ready Requires chain.
 
+- name: "Deploy the redundancy-coverage gate used by degraded assembly"
+  # Not a template: it takes the VG as an argument, so it stays byte-identical to
+  # the copy that tests/redundancy/run.sh drives with captured `lvs` fixtures.
+  ansible.builtin.copy:
+    src: encrypted-storage-redundancy-check
+    dest: /usr/local/sbin/encrypted-storage-redundancy-check
+    owner: root
+    group: root
+    mode: '0755'
+
 - name: "Deploy the encrypted-storage assemble script"
   ansible.builtin.template:
     src: encrypted-storage-assemble.sh.j2

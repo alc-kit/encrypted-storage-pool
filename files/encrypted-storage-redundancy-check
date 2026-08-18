@@ -1,0 +1,145 @@
+#!/bin/bash
+# Managed by Ansible role: encrypted_storage_pool
+# Do not edit by hand; redeployed on each role run.
+#
+# ── Is every missing PV in this VG covered by surviving redundancy? ──────────
+# Decides whether an LVM volume group with missing PVs may safely be activated
+# with `vgchange --activationmode partial`.
+#
+# WHY THIS EXISTS
+# ---------------
+# LVM refuses to activate a partial THIN POOL under its default
+# `activation_mode = "degraded"`:
+#
+#   Refusing activation of partial LV <vg>/<pool>.
+#   Use '--activationmode partial' to override.
+#
+# A plain raid1/raid10 LV activates degraded automatically, but the thin stack
+# does not — so a raid10 thin pool that loses ONE disk does not come back after a
+# reboot, even though a good copy of every extent survives. `partial` does bring
+# it up, but `partial` is indiscriminate: it will equally activate a pool that has
+# genuinely lost every copy of some region, handing consumers a device with holes.
+#
+# So `partial` is only safe once something has checked that the redundancy really
+# does cover the loss. That check is this script. Exit 0 -> the caller may
+# activate with --activationmode partial. Exit non-zero -> the caller must fail
+# closed and leave the barrier unreached.
+#
+# HOW COVERAGE IS DECIDED
+# -----------------------
+# `lvs -a -o lv_name,segtype,devices` prints `[unknown]` for a segment whose PV is
+# missing. An image is unusable if either its data (`_rimage_N`) or its per-image
+# raid metadata (`_rmeta_N`) is on a missing PV.
+#
+#   raid1   covered if AT LEAST ONE image survives.
+#   raid10  LVM builds raid10 as MD's "near" layout with 2 copies, so mirror
+#           partners are ADJACENT images: (0,1), (2,3), (4,5)...  Covered if EVERY
+#           pair keeps at least one image. (Verified empirically at -i 2 and at
+#           -i 5 by injecting device failures: killing both members of a pair
+#           loses the data; killing one per pair — even five of ten disks — does
+#           not. Re-verify on an LVM major upgrade: this is observed behaviour,
+#           not a documented contract.)
+#   linear / striped
+#           NO redundancy. Any `[unknown]` means real data is gone -> not covered.
+#           This is what catches a thin pool whose metadata LV is linear on a
+#           single PV: losing that one disk is unrecoverable and must NOT be
+#           papered over by a partial activation.
+#   other raid levels (raid0/4/5/6)
+#           Not produced by this role. Refuse to guess -> not covered.
+#
+#   *_pmspare is the repair-time spare metadata copy. Losing it does not affect
+#   activation, so it warns instead of blocking.
+#
+# USAGE
+#   encrypted-storage-redundancy-check <vg>
+#   encrypted-storage-redundancy-check --from-file <captured-lvs-output>
+#
+# The --from-file form exists so tests/redundancy/ can drive this exact script
+# with real captured `lvs` output — no LVM, no root, no block devices.
+set -uo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+usage() { echo "usage: $(basename "$0") <vg> | --from-file <file>" >&2; exit 2; }
+
+case "${1:-}" in
+  --from-file) [ -n "${2:-}" ] || usage; input=$(cat -- "$2") || exit 2 ;;
+  "" | -*)     usage ;;
+  *)           input=$(lvs -a --noheadings -o lv_name,segtype,devices -- "$1" 2>/dev/null) || {
+                 echo "redundancy-check: cannot read LV layout for VG '$1'" >&2; exit 1; }
+               ;;
+esac
+
+printf '%s\n' "$input" | awk '
+function strip(s) { gsub(/^\[|\]$/, "", s); return s }
+function missing(devstr) { return (devstr ~ /\[unknown\]/) }
+
+{
+  # lv_name segtype devices  — devices may be a comma-separated list
+  lv = strip($1); type = $2; devs = $3
+  seg[lv] = type; dev[lv] = devs; order[++n] = lv
+}
+
+END {
+  covered = 1
+
+  # ── raid parents: group images into mirror sets and check each set ─────────
+  for (i = 1; i <= n; i++) {
+    lv = order[i]
+    if (seg[lv] !~ /^raid/) continue
+
+    # count images from the parent’s device list (rimage_0, rimage_1, ...)
+    imgs = 0
+    while ((lv "_rimage_" imgs) in dev) imgs++
+    if (imgs == 0) { print "redundancy-check: " lv " (" seg[lv] ") has no images to inspect — refusing to guess"; covered = 0; continue }
+
+    for (k = 0; k < imgs; k++) {
+      rim = lv "_rimage_" k; rme = lv "_rmeta_" k
+      owned[rim] = 1; owned[rme] = 1
+      usable[k] = !(missing(dev[rim]) || ((rme in dev) && missing(dev[rme])))
+    }
+
+    if (seg[lv] == "raid1") {
+      alive = 0
+      for (k = 0; k < imgs; k++) if (usable[k]) alive++
+      if (alive == 0) { print "redundancy-check: " lv " (raid1) lost EVERY image — data gone"; covered = 0 }
+      else print "redundancy-check: " lv " (raid1) has " alive "/" imgs " image(s) — covered"
+    }
+    else if (seg[lv] == "raid10") {
+      if (imgs % 2 != 0) { print "redundancy-check: " lv " (raid10) has an odd image count (" imgs ") — cannot map mirror pairs, refusing"; covered = 0; continue }
+      lost = 0
+      for (k = 0; k < imgs; k += 2) {
+        if (!usable[k] && !usable[k+1]) {
+          print "redundancy-check: " lv " (raid10) mirror pair (" k "," k+1 ") lost BOTH images — data gone"
+          lost++
+        }
+      }
+      if (lost == 0) print "redundancy-check: " lv " (raid10) keeps >=1 image in every mirror pair — covered"
+      else covered = 0
+    }
+    else {
+      print "redundancy-check: " lv " has unsupported segment type \"" seg[lv] "\" — refusing to guess coverage"
+      covered = 0
+    }
+  }
+
+  # ── everything else that sits directly on PVs and has no redundancy ───────
+  for (i = 1; i <= n; i++) {
+    lv = order[i]
+    if (lv in owned) continue                      # handled by its raid parent
+    if (seg[lv] ~ /^raid/) continue                # handled above
+    if (dev[lv] !~ /\/dev\/|\[unknown\]/) continue # references an LV, not PVs (thin, thin-pool)
+    if (!missing(dev[lv])) continue
+
+    if (lv ~ /_pmspare$/) {
+      print "redundancy-check: WARNING " lv " (repair-time spare metadata) is on a missing PV — activation unaffected, but repair capacity is reduced"
+      continue
+    }
+    print "redundancy-check: " lv " (" seg[lv] ", no redundancy) is on a missing PV — data gone"
+    covered = 0
+  }
+
+  if (covered) { print "redundancy-check: VERDICT covered — surviving copies exist for every extent"; exit 0 }
+  print "redundancy-check: VERDICT NOT covered — refusing partial activation"
+  exit 1
+}
+'

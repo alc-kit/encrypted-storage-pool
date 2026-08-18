@@ -45,6 +45,29 @@ if mount "$mnt" 2>/dev/null; then
   echo "assemble: mounted $mnt (lvm, DEGRADED)"
   exit 0
 fi
+{% if encrypted_storage_pool_degraded_activation | default(true) | bool %}
+# Still down. `degraded` is NOT enough for a THIN POOL: LVM refuses to activate a
+# partial thin pool in that mode ("Refusing activation of partial LV ... Use
+# '--activationmode partial' to override"), so a raid10 thin pool that lost one
+# disk stays down across a reboot even though every extent still has a good copy.
+# `partial` does bring it up — but it is indiscriminate, and would equally
+# activate a pool that has lost every copy of some region, handing guests a
+# device with holes. So gate it: only escalate once the surviving redundancy has
+# been shown to cover the loss. Covered -> come up degraded, the same way a ZFS
+# mirror imports DEGRADED and keeps serving. Not covered -> stay down and let
+# encrypted-storage-check hold the barrier closed, which is the correct outcome.
+if /usr/local/sbin/encrypted-storage-redundancy-check "{{ encrypted_storage_pool_name }}"; then
+  echo "assemble: WARNING pool {{ encrypted_storage_pool_name }} has missing device(s) but redundancy covers them — activating DEGRADED"
+  vgchange -ay --activationmode partial "{{ encrypted_storage_pool_name }}" >/dev/null 2>&1 || true
+  if mount "$mnt" 2>/dev/null; then
+    echo "assemble: mounted $mnt (lvm, DEGRADED via --activationmode partial) — REPLACE the failed device(s) and repair the array"
+    exit 0
+  fi
+  echo "assemble: partial activation succeeded but $mnt still will not mount" >&2
+else
+  echo "assemble: REFUSING to activate {{ encrypted_storage_pool_name }} — the missing device(s) are NOT covered by surviving redundancy; leaving the storage barrier closed" >&2
+fi
+{% endif %}
 {% endif %}
 
 echo "assemble: FAILED to mount $mnt (insufficient members decrypted?)" >&2
