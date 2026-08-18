@@ -1,0 +1,13 @@
+  data                   thin                                                                                                     
+  [lvol0_pmspare]        linear    /dev/loop0(116)                                                                                
+  tpool                  thin-pool tpool_tdata(0)                                                                                 
+  [tpool_tdata]          raid10    tpool_tdata_rimage_0(0),tpool_tdata_rimage_1(0),tpool_tdata_rimage_2(0),tpool_tdata_rimage_3(0)
+  [tpool_tdata_rimage_0] linear    /dev/loop0(1)                                                                                  
+  [tpool_tdata_rimage_1] linear    /dev/loop1(1)                                                                                  
+  [tpool_tdata_rimage_2] linear    /dev/loop2(1)                                                                                  
+  [tpool_tdata_rimage_3] linear    /dev/loop3(1)                                                                                  
+  [tpool_tdata_rmeta_0]  linear    /dev/loop0(0)                                                                                  
+  [tpool_tdata_rmeta_1]  linear    /dev/loop1(0)                                                                                  
+  [tpool_tdata_rmeta_2]  linear    /dev/loop2(0)                                                                                  
+  [tpool_tdata_rmeta_3]  linear    /dev/loop3(0)                                                                                  
+  [tpool_tmeta]          linear    /dev/loop0(115)                                                                                

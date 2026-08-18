@@ -1,0 +1,81 @@
+---
+# PURE decision step for the thin pool's metadata redundancy — no commands, no block
+# devices, no root. Given captured `lvs` output and a candidate PV list, decide
+# whether the metadata LV needs mirroring and which PV the new leg should land on.
+#
+# Split out of lvm-thin-metadata.yml precisely so tests/thin-metadata/ can drive it
+# with real captured `lvs` output. Inputs (both injectable):
+#
+#   _esp_meta_lvs_lines    `lvs -a --noheadings -o lv_name,segtype,devices <vg>` output,
+#                          as a LIST of lines (stdout_lines from the command, or
+#                          `lookup('file', ...).splitlines()` in the fixture harness)
+#   encrypted_storage_pool_lvm_thin_meta_devices
+#                          the caller's candidate members for the second leg
+#                          ([] = let LVM choose). Mapped to PV paths here, so the
+#                          mapping is covered by the fixture tests too.
+#
+# Outputs:
+#   _esp_meta_segtype    the metadata LV's current segment type ('' if there is none)
+#   _esp_meta_current_pv the PV holding it while still linear ('' otherwise)
+#   _esp_meta_needed     true when it is linear and must be mirrored
+#   _esp_meta_target     PV path for the new leg ('' = let LVM allocate)
+
+# Two deliberate choices, both because backslash escapes do NOT survive the
+# YAML -> Jinja -> regex path in a folded scalar and fail SILENTLY (matching nothing,
+# i.e. quietly concluding "no metadata LV, nothing to do" — the worst possible default
+# for a redundancy guard):
+#   * the input is a LIST of lines, so nothing here has to split on '\n';
+#   * brackets are stripped with plain `replace`, and the row is matched with a
+#     literal-space pattern, so the expression contains no backslashes at all.
+# tests/thin-metadata/ pins this behaviour against real captured `lvs` output.
+- name: "Metadata plan | map the caller's member list to PV paths"
+  # Accepts either vocabulary: a bare crypt-<uuid> member name (the role's usual
+  # currency, prefixed here) or an already-absolute device path (passed through).
+  ansible.builtin.set_fact:
+    _esp_meta_candidates: >-
+      {{ encrypted_storage_pool_lvm_thin_meta_devices | default([])
+         | map('regex_replace', '^(?!/)', '/dev/mapper/crypt-') | list }}
+
+- name: "Metadata plan | locate the thin pool's metadata LV in the lvs output"
+  ansible.builtin.set_fact:
+    _esp_meta_row: >-
+      {{ (_esp_meta_lvs_lines | default([]))
+         | map('replace', '[', '') | map('replace', ']', '') | map('trim')
+         | select('search', '^' ~ encrypted_storage_pool_lvm_thin_pool_name ~ '_tmeta +')
+         | list | first | default('') }}
+
+- name: "Metadata plan | read its segment type and (while linear) the PV under it"
+  ansible.builtin.set_fact:
+    _esp_meta_segtype: "{{ (_esp_meta_row.split() | default([]))[1] | default('') }}"
+    _esp_meta_current_pv: >-
+      {{ ((_esp_meta_row.split() | default([]))[2] | default('')).split('(')[0]
+         if ((_esp_meta_row.split() | default([]))[1] | default('')) == 'linear' else '' }}
+
+- name: "Metadata plan | a linear metadata LV is a single-disk point of failure — mirror it"
+  ansible.builtin.set_fact:
+    _esp_meta_needed: "{{ _esp_meta_segtype == 'linear' }}"
+
+# raid1 legs cannot share a PV, so the PV already carrying the linear metadata is not a
+# valid home for the second leg. Naming only that PV is a caller error worth failing on:
+# silently ignoring the request would place the leg somewhere unintended, which for the
+# fault-domain caller is the whole point of asking.
+- name: "Metadata plan | reject a candidate list that offers only the PV already in use"
+  ansible.builtin.assert:
+    that: >-
+      (_esp_meta_candidates | default([]) | reject('equalto', _esp_meta_current_pv) | list | length) > 0
+    fail_msg: >-
+      The only candidate PV for the second thin-pool metadata leg
+      ({{ _esp_meta_candidates | default([]) | join(', ') }}) is the PV that already
+      carries the metadata ({{ _esp_meta_current_pv }}). raid1 legs must sit on
+      different PVs — offer at least one other member.
+    success_msg: "at least one candidate PV differs from the current metadata PV"
+    quiet: true
+  when:
+    - _esp_meta_needed | bool
+    - (_esp_meta_candidates | default([]) | length) > 0
+
+- name: "Metadata plan | pick the target PV for the new leg (first candidate that is free)"
+  ansible.builtin.set_fact:
+    _esp_meta_target: >-
+      {{ (_esp_meta_candidates | default([]) | reject('equalto', _esp_meta_current_pv)
+          | list | first | default('')) if _esp_meta_needed | bool else '' }}

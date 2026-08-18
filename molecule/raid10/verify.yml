@@ -140,6 +140,40 @@
         success_msg: "LVM raid10 thin pool + thin 'data' volume present."
       when: esp_backend == 'lvm'
 
+    - name: "RAID10 (lvm) | read the metadata LV's segment type + the PVs under its legs"
+      ansible.builtin.command: >-
+        lvs -a --noheadings -o lv_name,segtype,devices
+        {{ encrypted_storage_pool_name }}
+      register: _esp_lvs_meta
+      changed_when: false
+      when: esp_backend == 'lvm'
+
+    - name: "RAID10 (lvm) | assert the thin pool's METADATA is mirrored, not linear on one disk"
+      # A linear tmeta means one disk can destroy a raid10 pool: array intact,
+      # metadata gone, pool unactivatable in any mode. It must be raid1 with its two
+      # legs on DIFFERENT PVs — they are a mirror pair like any other.
+      vars:
+        _esp_meta_rows: >-
+          {{ _esp_lvs_meta.stdout_lines | map('replace', '[', '')
+             | map('replace', ']', '') | map('trim') | list }}
+        _esp_meta_type: >-
+          {{ (_esp_meta_rows | select('search', '^' ~ encrypted_storage_pool_lvm_thin_pool_name ~ '_tmeta +')
+              | list | first | default('')).split()[1] | default('') }}
+        _esp_meta_leg_pvs: >-
+          {{ _esp_meta_rows | select('search', '_tmeta_rimage_')
+             | map('split') | map('last') | map('regex_replace', '\(.*$', '') | list }}
+      ansible.builtin.assert:
+        that:
+          - _esp_meta_type == 'raid1'
+          - (_esp_meta_leg_pvs | length) == 2
+          - (_esp_meta_leg_pvs | unique | length) == 2
+        fail_msg: >-
+          thin-pool metadata is '{{ _esp_meta_type }}' on legs {{ _esp_meta_leg_pvs }} —
+          expected raid1 across two distinct PVs. Layout: {{ _esp_lvs_meta.stdout }}
+        success_msg: >-
+          thin-pool metadata is raid1 across two distinct PVs ({{ _esp_meta_leg_pvs | join(', ') }}).
+      when: esp_backend == 'lvm'
+
     - name: "Assert real I/O on the pool survives the reboot (write + read back)"
       ansible.builtin.shell:
         cmd: |
