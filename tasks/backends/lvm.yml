@@ -122,3 +122,14 @@
         fstype: ext4
         opts: "noauto,_netdev,x-systemd.after=network-online.target"
         state: mounted
+
+    # Deliberately OUTSIDE the "VG does not exist yet" block above: LVM's default
+    # thin-pool conversion leaves the metadata LV linear on ONE disk, so pools built
+    # by earlier versions of this role carry that exposure and must be able to gain
+    # redundancy in place on an ordinary converge. Idempotent — already-mirrored
+    # metadata is detected and skipped.
+    - name: "LVM | thin | ensure the pool's metadata is mirrored, not linear on one disk"
+      ansible.builtin.include_tasks: lvm-thin-metadata.yml
+      when:
+        - encrypted_storage_pool_lvm_thin | default(false) | bool
+        - encrypted_storage_pool_lvm_thin_meta_mirrored | default(true) | bool

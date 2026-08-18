@@ -1,0 +1,107 @@
+---
+# Make the thin pool's METADATA as redundant as its data.
+#
+# `lvconvert --type thin-pool` lets LVM auto-create the pool's metadata LV, and LVM
+# creates it LINEAR — on a single PV. The data LV can be raid10 across ten disks and
+# the pool still dies with the one disk that happens to carry `<pool>_tmeta`: the
+# array is intact, the metadata is gone, and the pool cannot be activated in any
+# mode. A ZFS pool has no such disk, because it keeps redundant metadata copies
+# inside the pool by design. This task closes that gap.
+#
+# Mechanism (verified, and deliberately NOT "create the metadata LV ourselves"):
+#   1. let the default conversion happen as before, so LVM keeps ownership of
+#      metadata SIZING — no magic number in this role to drift from LVM's own
+#      heuristics as pools grow;
+#   2. then `lvconvert -m 1` the existing metadata LV into a raid1 mirror.
+#
+# That single mechanism serves both a fresh pool and an already-built one, so an
+# existing node gains redundancy in place, with its data untouched — no destroy and
+# rebuild. Requires the pool to be ACTIVE (LVM refuses on an inactive LV), hence the
+# vgchange first; idempotent, because a metadata LV that is already raid1 is skipped.
+#
+# Placement: the existing leg stays where LVM put it; the NEW leg goes on a PV the
+# caller may name via encrypted_storage_pool_lvm_thin_meta_devices. That is the hook
+# for fault-domain-aware placement — the two legs are a mirror pair like any other and
+# should not share a controller/enclosure. Left empty, LVM allocates the leg itself:
+# still redundant, not yet domain-aware.
+#
+# NOTE: `<pool>_pmspare`, the repair-time spare metadata copy, stays linear and LVM
+# tends to place it alongside the original metadata leg. It is not consulted during
+# activation, so it is not a boot-time SPOF; encrypted-storage-redundancy-check warns
+# when it is on a missing PV.
+
+- name: "LVM thin | metadata | activate the VG (lvconvert refuses on an inactive LV)"
+  ansible.builtin.command: "vgchange -ay {{ encrypted_storage_pool_name }}"
+  register: _esp_meta_vgchange
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: "LVM thin | metadata | read the pool's LV layout"
+  ansible.builtin.command: >-
+    lvs -a --noheadings -o lv_name,segtype,devices {{ encrypted_storage_pool_name }}
+  register: _esp_meta_lvs
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: "LVM thin | metadata | decide whether to mirror, and where"
+  ansible.builtin.include_tasks: lvm-thin-metadata-plan.yml
+  vars:
+    _esp_meta_lvs_lines: "{{ _esp_meta_lvs.stdout_lines | default([]) }}"
+
+- name: "LVM thin | metadata | report that it is already mirrored"
+  ansible.builtin.debug:
+    msg: >-
+      thin-pool metadata ({{ encrypted_storage_pool_lvm_thin_pool_name }}_tmeta) is
+      already '{{ _esp_meta_segtype }}' — no single disk can take the pool with it.
+  when: not (_esp_meta_needed | bool)
+
+- name: "LVM thin | metadata | mirror the metadata LV onto a second PV"
+  ansible.builtin.command: >-
+    lvconvert -y -m 1
+    {{ encrypted_storage_pool_name }}/{{ encrypted_storage_pool_lvm_thin_pool_name }}_tmeta
+    {{ _esp_meta_target }}
+  when: _esp_meta_needed | bool
+  changed_when: true
+
+- name: "LVM thin | metadata | confirm the mirrored layout + report the legs"
+  when: _esp_meta_needed | bool
+  block:
+    - name: "LVM thin | metadata | re-read the layout"
+      ansible.builtin.command: >-
+        lvs -a --noheadings -o lv_name,segtype,devices {{ encrypted_storage_pool_name }}
+      register: _esp_meta_lvs_after
+      changed_when: false
+      check_mode: false
+
+    - name: "LVM thin | metadata | re-read the decision from the new layout"
+      # Reuses the same parse as the plan step (and therefore the same fixture-tested
+      # code path) instead of hand-rolling a second regex here.
+      ansible.builtin.include_tasks: lvm-thin-metadata-plan.yml
+      vars:
+        _esp_meta_lvs_lines: "{{ _esp_meta_lvs_after.stdout_lines | default([]) }}"
+        # No candidates on the re-read: this pass only confirms the new segment type.
+        encrypted_storage_pool_lvm_thin_meta_devices: []
+
+    - name: "LVM thin | metadata | assert it really is raid1 now"
+      ansible.builtin.assert:
+        that:
+          - _esp_meta_segtype == 'raid1'
+          - not (_esp_meta_needed | bool)
+        fail_msg: >-
+          thin-pool metadata is '{{ _esp_meta_segtype | default('absent') }}', not raid1,
+          after lvconvert — the pool remains exposed to the loss of a single disk.
+          Layout was: {{ _esp_meta_lvs_after.stdout }}
+        success_msg: "thin-pool metadata is now raid1 (mirrored across two PVs)"
+        quiet: true
+
+    - name: "LVM thin | metadata | show which PVs the two legs landed on"
+      # Worth logging: these two legs are a mirror pair, so an operator (or the
+      # fault-domain audit) needs to see whether they share a fault domain.
+      ansible.builtin.debug:
+        msg: >-
+          thin-pool metadata legs:
+          {{ _esp_meta_lvs_after.stdout_lines
+             | map('replace', '[', '') | map('replace', ']', '') | map('trim')
+             | select('search', '_tmeta_rimage_') | list }}

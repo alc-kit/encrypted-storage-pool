@@ -1,0 +1,33 @@
+---
+# Device-free harness: run the REAL metadata-redundancy decision step
+# (tasks/backends/lvm-thin-metadata-plan.yml) against `lvs` output captured from a
+# live thin pool, injected with `-e @fixtures/<case>.json`. run.sh invokes this once
+# per case and checks both the play's exit status and the decision facts.
+# No LVM, no root, no block devices.
+
+- name: "Thin-pool metadata plan — fixture harness"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    encrypted_storage_pool_lvm_thin_pool_name: tpool
+  tasks:
+    - name: "Load the captured lvs output named by the fixture"
+      ansible.builtin.set_fact:
+        _esp_meta_lvs_lines: "{{ lookup('file', playbook_dir ~ '/fixtures/' ~ lvs_fixture).splitlines() }}"
+
+    - name: "Run the role's real decision step"
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/backends/lvm-thin-metadata-plan.yml"
+
+    - name: "Report the decision (run.sh asserts on these lines)"
+      ansible.builtin.debug:
+        msg: "DECISION needed={{ _esp_meta_needed }} segtype='{{ _esp_meta_segtype }}' target='{{ _esp_meta_target }}'"
+
+    - name: "Assert the expected decision"
+      ansible.builtin.assert:
+        that:
+          - (_esp_meta_needed | bool) == (expect_needed | bool)
+          - _esp_meta_target == expect_target
+        fail_msg: >-
+          expected needed={{ expect_needed }} target='{{ expect_target }}', got
+          needed={{ _esp_meta_needed }} target='{{ _esp_meta_target }}'
+        quiet: true

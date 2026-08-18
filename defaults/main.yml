@@ -37,6 +37,28 @@ encrypted_storage_pool_install_packages: true
 # DESTRUCTIVE: destroy an existing pool before (re-)creating.
 encrypted_storage_pool_destroy_existing: false
 
+# ── Thin-pool metadata redundancy (lvm backend, thin mode) ──────────────────
+# `lvconvert --type thin-pool` lets LVM auto-create the pool's metadata LV, and LVM
+# makes it LINEAR — on a single PV. The data LV can be raid10 across ten disks and
+# the pool still dies with the one disk carrying `<pool>_tmeta`: array intact,
+# metadata gone, pool unactivatable in any mode. ZFS has no equivalent disk, because
+# it keeps redundant metadata inside the pool by design.
+#
+# true converts that metadata LV to a raid1 mirror (`lvconvert -m 1`) after the pool
+# exists — for freshly built AND already-built pools, in place, data untouched. LVM
+# keeps ownership of metadata sizing; this only adds the second copy.
+encrypted_storage_pool_lvm_thin_meta_mirrored: true
+
+# Which PV the SECOND metadata leg should land on. Entries are pool members in the
+# same vocabulary as encrypted_storage_pool_devices (a crypt-<uuid> name, or a full
+# path); the first entry that is not already carrying the metadata wins. Empty → LVM
+# allocates the leg itself: still redundant, but not fault-domain-aware.
+#
+# This is the hook for fault-domain-aware placement: the two metadata legs are a
+# mirror pair like any other, so they should not share a controller/enclosure with
+# each other. A caller that knows the disk topology passes the right member here.
+encrypted_storage_pool_lvm_thin_meta_devices: []
+
 # ── Degraded assembly (lvm backend) ─────────────────────────────────────────
 # When a member device is missing at boot (dead disk, or a mapper that never
 # unlocked), come up DEGRADED on the surviving copies instead of not coming up at
