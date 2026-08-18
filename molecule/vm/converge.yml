@@ -9,13 +9,42 @@
   become: true
   gather_facts: true
   vars:
+    esp_backend: "{{ encrypted_storage_pool_backend | default('btrfs') }}"
     esp_mnt: "/srv/{{ encrypted_storage_pool_name | default('data') }}"
     esp_payload: "{{ esp_mnt }}/esp-integrity.bin"
     esp_expected: /var/lib/esp-integrity.expected.sha256
 
-  roles:
-    - clevis_encryption
-    - encrypted_storage_pool
+  # Deliberately include_role rather than `roles:`, so an explicit member ORDER can
+  # be computed BETWEEN the two: clevis has to create the crypt-* mappers before
+  # their names are knowable, and encrypted_storage_pool needs the order before it
+  # creates the LV.
+  tasks:
+    - name: "Converge | clevis_encryption (NBDE-only)"
+      ansible.builtin.include_role:
+        name: clevis_encryption
+
+    - name: "Converge | read the crypt-* members clevis just wrote"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          awk '$1 ~ /^crypt-/ {sub(/^crypt-/, "", $1); print $1}' /etc/crypttab
+        executable: /bin/bash
+      register: _esp_test_members
+      changed_when: false
+      when: esp_backend == 'lvm'
+
+    - name: "Converge | impose a REVERSED member order (lvm only)"
+      # Reversed on purpose: crypttab order is what LVM would use if the explicit PV
+      # list were ignored or mispositioned, so verify.yml asserting the reversed
+      # mapping proves the order actually reached lvcreate and pinned placement.
+      # A real caller passes a fault-domain-derived order here instead.
+      ansible.builtin.set_fact:
+        encrypted_storage_pool_device_order: "{{ _esp_test_members.stdout_lines | reverse | list }}"
+      when: esp_backend == 'lvm'
+
+    - name: "Converge | encrypted_storage_pool"
+      ansible.builtin.include_role:
+        name: encrypted_storage_pool
 
   # Once the pool is assembled + mounted (pre-reboot), seed a known payload and
   # record its digest OUTSIDE the pool. side_effect.yml then reboots and verify.yml

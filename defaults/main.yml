@@ -37,6 +37,23 @@ encrypted_storage_pool_install_packages: true
 # DESTRUCTIVE: destroy an existing pool before (re-)creating.
 encrypted_storage_pool_destroy_existing: false
 
+# ── Explicit member ORDER (lvm backend) ─────────────────────────────────────
+# `lvcreate --type raid10 -i N` with no trailing PV list lets LVM's allocator
+# decide which PV carries which raid image — so which two disks form a mirror PAIR
+# is out of the caller's hands. Naming the PVs pins it: image k lands on the k-th
+# entry, and mirror partners are ADJACENT images ((0,1), (2,3), ...).
+#
+# That matters because neither LVM nor ZFS has any concept of controller/enclosure
+# anti-affinity: the listing order is the ONLY lever against one hardware failure
+# taking out both halves of a mirror. This role does not know the hardware
+# topology; a caller that does can pass the order here.
+#
+# Entries may be bare crypttab names, crypt-<uuid> mapper names, or full paths, and
+# must name exactly the pool's members — a partial or foreign order is refused
+# rather than partially applied. Empty (the default) preserves the previous
+# behaviour: LVM allocates, and the pairing is arbitrary.
+encrypted_storage_pool_device_order: []
+
 # ── Thin-pool metadata redundancy (lvm backend, thin mode) ──────────────────
 # `lvconvert --type thin-pool` lets LVM auto-create the pool's metadata LV, and LVM
 # makes it LINEAR — on a single PV. The data LV can be raid10 across ten disks and

@@ -1,0 +1,24 @@
+---
+# Device-free harness for the explicit PV-order preparation
+# (tasks/backends/lvm-device-order.yml): normalisation of the three accepted
+# spellings, and the refusal of any order that does not name exactly the pool's
+# members. No LVM, no devices, no root.
+
+- name: "PV order preparation — fixture harness"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: "Run the role's real preparation on the injected fixture"
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/backends/lvm-device-order.yml"
+
+    - name: "Show the resulting PV list"
+      ansible.builtin.debug:
+        msg: "pv_order='{{ _esp_pv_order }}'"
+
+    - name: "Assert the expected PV list"
+      ansible.builtin.assert:
+        that:
+          - _esp_pv_order == expect_pv_order
+        fail_msg: "expected '{{ expect_pv_order }}', got '{{ _esp_pv_order }}'"
+        quiet: true
+      when: expect_pv_order is defined

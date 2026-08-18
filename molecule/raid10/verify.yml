@@ -183,6 +183,45 @@
           ({{ _esp_meta_facts.stdout_lines | default([]) | join(', ') }}).
       when: esp_backend == 'lvm'
 
+    - name: "RAID10 (lvm) | read the data LV's raid image -> PV mapping"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          vg='{{ encrypted_storage_pool_name }}'
+          pool='{{ esp_thin_pool }}'
+          lvs -a --noheadings -o lv_name,devices "$vg" | tr -d '[]' \
+            | awk -v n="${pool}_tdata_rimage_" 'index($1,n)==1 {
+                split($2, x, "("); sub(".*_rimage_", "", $1); print $1, x[1] }' \
+            | sort -n | awk '{printf "%s ", $2}'
+          echo
+          awk '$1 ~ /^crypt-/ {print "/dev/mapper/" $1}' /etc/crypttab
+        executable: /bin/bash
+      register: _esp_image_map
+      changed_when: false
+      when: esp_backend == 'lvm'
+
+    - name: "RAID10 (lvm) | assert placement followed the imposed REVERSED order"
+      # converge.yml handed the role the crypttab members in reverse. If the
+      # explicit PV list had been ignored or mispositioned, image k would sit on
+      # the k-th crypttab member instead — so this asserts the order genuinely
+      # reached lvcreate and pinned which disks are mirror partners.
+      vars:
+        _esp_image_pvs: "{{ _esp_image_map.stdout_lines[0] | default('') | split() | list }}"
+        _esp_crypttab_pvs: "{{ _esp_image_map.stdout_lines[1:] | default([]) }}"
+      ansible.builtin.assert:
+        that:
+          - (_esp_image_pvs | length) == (_esp_crypttab_pvs | length)
+          - _esp_image_pvs == (_esp_crypttab_pvs | reverse | list)
+        fail_msg: >-
+          raid image placement does not follow the imposed order.
+          images (0..n): {{ _esp_image_pvs }}
+          crypttab order: {{ _esp_crypttab_pvs }}
+          expected the reverse of crypttab.
+        success_msg: >-
+          raid image k sits on the k-th PV of the imposed order — placement is
+          pinned by the explicit PV list ({{ _esp_image_pvs | length }} images).
+      when: esp_backend == 'lvm'
+
     - name: "Assert real I/O on the pool survives the reboot (write + read back)"
       ansible.builtin.shell:
         cmd: |

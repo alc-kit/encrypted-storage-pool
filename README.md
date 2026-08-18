@@ -42,6 +42,36 @@ fail-degraded, and fail-**closed** lives in the `check → ready` `Requires=` ch
 (a partial unlock can still bring up a `-o degraded` btrfs raid1; the check gate
 decides viability).
 
+### Explicit member order (which disks become mirror partners)
+
+`lvcreate --type raid10 -i N` with no trailing PV list lets LVM's allocator decide
+which PV carries which raid image — so **which two disks form a mirror pair is out
+of the caller's hands**. Naming the PVs pins it: image *k* lands on the *k*-th
+entry, and mirror partners are **adjacent** images (`(0,1)`, `(2,3)`, … — MD's near
+layout with 2 copies, verified by failure injection at `-i 2` and `-i 5`).
+
+That matters because neither LVM nor ZFS has any concept of controller/enclosure
+anti-affinity: the listing order is the only lever against one hardware failure —
+a cable, a sled, a backplane — taking out both halves of a mirror. This role does
+not know the hardware topology. A caller that does can pass the order:
+
+```yaml
+encrypted_storage_pool_device_order:
+  - 1111-aaaa        # bare crypttab name…
+  - crypt-2222-bbbb  # …or a mapper name…
+  - /dev/mapper/crypt-3333-cccc   # …or a full path
+```
+
+It must name **exactly** the pool's members. A partial, padded or foreign order is
+**refused**, not partially applied: using it would place raid images on devices the
+caller did not choose, and ignoring it would silently discard a safety decision
+while leaving a pool that looks deliberate. Empty (the default) keeps the previous
+behaviour — LVM allocates, and the pairing is arbitrary.
+
+Applies to the thick data LV and to the thin pool's data LV (the raid10 one). The
+`raid10` Molecule scenario imposes a *reversed* order and asserts the as-built
+image→PV mapping follows it, so a silently ignored order fails CI.
+
 ### Thin-pool metadata redundancy
 
 `lvconvert --type thin-pool` lets LVM auto-create the pool's metadata LV, and LVM makes
@@ -146,6 +176,7 @@ automatically. The btrfs backend ignores the thin variables.
 | `encrypted_storage_pool_ensure` | `true` | Create/assemble the pool on every run. |
 | `encrypted_storage_pool_install_packages` | `true` | Install `btrfs-progs` / `lvm2` (+ `thin-provisioning-tools` when thin). |
 | `encrypted_storage_pool_destroy_existing` | `false` | **Destructive.** Destroy an existing pool first. |
+| `encrypted_storage_pool_device_order` | `[]` | Ordered member list pinning which disks become mirror partners (see [Explicit member order](#explicit-member-order-which-disks-become-mirror-partners)). Must name exactly the pool's members. |
 | `encrypted_storage_pool_lvm_thin_meta_mirrored` | `true` | Convert the thin pool's metadata LV to a raid1 mirror so no single disk can destroy the pool (see [Thin-pool metadata redundancy](#thin-pool-metadata-redundancy)). |
 | `encrypted_storage_pool_lvm_thin_meta_devices` | `[]` | Member(s) the **second** metadata leg may land on (crypt-`<uuid>` name or full path). Empty → LVM chooses. The fault-domain placement hook. |
 | `encrypted_storage_pool_degraded_activation` | `true` | Come up DEGRADED when a device is missing but redundancy covers it (see [Degraded assembly](#degraded-assembly-missing-device-at-boot)). `false` → any missing device keeps the pool down. |
@@ -178,6 +209,9 @@ next to yamllint/ansible-lint:
 - `tests/topology/run.sh` runs the real `validate-topology.yml` guard against
   synthetic fixtures and asserts that valid setups pass and invalid ones (unknown
   topology, too-few members, odd raid10) are rejected.
+- `tests/device-order/run.sh` drives the real PV-order preparation: all three
+  accepted member spellings normalise to the same paths, and an order that does not
+  name exactly the pool's members (missing, foreign, or duplicated) is refused.
 - `tests/thin-metadata/run.sh` drives the real metadata-redundancy decision step
   against `lvs` output captured from a live thin pool before and after mirroring,
   asserting that linear metadata is detected and mirrored, that already-mirrored metadata
