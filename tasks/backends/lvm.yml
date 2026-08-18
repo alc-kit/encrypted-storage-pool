@@ -49,6 +49,9 @@
             {{ encrypted_storage_pool_devices_resolved | map('regex_replace', '^', '/dev/mapper/crypt-') | join(' ') }}
           changed_when: true
 
+        - name: "LVM | prepare the explicit PV list (pins raid image placement)"
+          ansible.builtin.include_tasks: lvm-device-order.yml
+
         - name: "LVM | compute the topology's RAID geometry for lvcreate"
           # mirror -> raid1 (-m1, one redundant copy); stripe -> striped across all
           # PVs; raid10 -> striped over 2-way mirrors, so stripes = members / 2.
@@ -61,9 +64,12 @@
 
         # ── Thick (default): one data LV filling the VG ─────────────────────────
         - name: "LVM | lvcreate the thick data LV, topology {{ encrypted_storage_pool_topology }}"
+          # The trailing PV list is what pins which disk carries which raid image,
+          # and therefore which two disks form a mirror pair. Empty -> LVM's own
+          # allocator chooses, as before.
           ansible.builtin.command: >-
             lvcreate -y -n data -l 100%FREE {{ _esp_lvm_geometry }}
-            {{ encrypted_storage_pool_name }}
+            {{ encrypted_storage_pool_name }} {{ _esp_pv_order }}
           when: not (encrypted_storage_pool_lvm_thin | default(false) | bool)
           changed_when: true
 
@@ -73,10 +79,12 @@
         # headroom), and a thin 'data' volume is created on top — so the mount src
         # (/dev/<vg>/data) is identical to the thick path.
         - name: "LVM | thin | lvcreate the pool data LV, topology {{ encrypted_storage_pool_topology }}"
+          # Same trailing PV list: the thin pool's DATA LV is the raid10 one, so
+          # this is where fault-domain-aware placement has to land.
           ansible.builtin.command: >-
             lvcreate -y -n {{ encrypted_storage_pool_lvm_thin_pool_name }}
             -l {{ encrypted_storage_pool_lvm_thin_pool_extents }} {{ _esp_lvm_geometry }}
-            {{ encrypted_storage_pool_name }}
+            {{ encrypted_storage_pool_name }} {{ _esp_pv_order }}
           when: encrypted_storage_pool_lvm_thin | default(false) | bool
           changed_when: true
 

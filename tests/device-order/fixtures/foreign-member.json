@@ -1,0 +1,14 @@
+{
+  "encrypted_storage_pool_devices_resolved": [
+    "1111-aaaa",
+    "2222-bbbb",
+    "3333-cccc",
+    "4444-dddd"
+  ],
+  "encrypted_storage_pool_device_order": [
+    "1111-aaaa",
+    "2222-bbbb",
+    "3333-cccc",
+    "not-a-member"
+  ]
+}

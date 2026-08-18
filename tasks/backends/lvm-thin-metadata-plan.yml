@@ -33,8 +33,17 @@
   # currency, prefixed here) or an already-absolute device path (passed through).
   ansible.builtin.set_fact:
     _esp_meta_candidates: >-
-      {{ encrypted_storage_pool_lvm_thin_meta_devices | default([])
-         | map('regex_replace', '^(?!/)', '/dev/mapper/crypt-') | list }}
+      {%- set out = [] -%}
+      {%- for d in (encrypted_storage_pool_lvm_thin_meta_devices | default([])) -%}
+        {%- if d.startswith('/') -%}
+          {%- set _ = out.append(d) -%}
+        {%- elif d.startswith('crypt-') -%}
+          {%- set _ = out.append('/dev/mapper/' ~ d) -%}
+        {%- else -%}
+          {%- set _ = out.append('/dev/mapper/crypt-' ~ d) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
 
 - name: "Metadata plan | locate the thin pool's metadata LV in the lvs output"
   ansible.builtin.set_fact:
