@@ -12,6 +12,10 @@
     esp_mnt: "/srv/{{ encrypted_storage_pool_name | default('data') }}"
     esp_expected: /var/lib/esp-integrity.expected.sha256
     esp_backend: "{{ encrypted_storage_pool_backend | default('btrfs') }}"
+    # verify.yml is a standalone play — it does not include the role, so role DEFAULTS
+    # are not in scope here. Anything the scenario's host_vars do not set has to carry
+    # its default locally, like esp_mnt/esp_backend above.
+    esp_thin_pool: "{{ encrypted_storage_pool_lvm_thin_pool_name | default('tpool') }}"
 
   tasks:
     - name: "Assert encrypted-storage-ready.target reached (the boot barrier)"  # noqa: command-instead-of-module
@@ -140,38 +144,43 @@
         success_msg: "LVM raid10 thin pool + thin 'data' volume present."
       when: esp_backend == 'lvm'
 
-    - name: "RAID10 (lvm) | read the metadata LV's segment type + the PVs under its legs"
-      ansible.builtin.command: >-
-        lvs -a --noheadings -o lv_name,segtype,devices
-        {{ encrypted_storage_pool_name }}
-      register: _esp_lvs_meta
+    - name: "RAID10 (lvm) | resolve the metadata LV's segtype, leg count + distinct leg PVs"
+      # Extraction is done in shell, not Jinja: pulling a PV out of `lvs` output needs
+      # to cut at the "(extent)" suffix, and the escapes that needs do not survive the
+      # YAML -> Jinja -> regex path (they fail silently, which for an assertion means it
+      # quietly passes). awk on tr-stripped output has neither problem.
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          vg='{{ encrypted_storage_pool_name }}'
+          pool='{{ esp_thin_pool }}'
+          lvs -a --noheadings -o lv_name,segtype "$vg" | tr -d '[]' \
+            | awk -v n="${pool}_tmeta" '$1==n {print "segtype="$2}'
+          lvs -a --noheadings -o lv_name "$vg" | tr -d '[] ' \
+            | awk -v n="${pool}_tmeta_rimage_" 'index($1,n)==1 {c++} END{print "legs="c+0}'
+          pvs --noheadings -o pv_name,lv_name 2>/dev/null | tr -d '[]' \
+            | awk -v n="${pool}_tmeta_rimage_" 'index($2,n)==1 {print $1}' | sort -u \
+            | awk 'END{print "distinct_pvs="NR+0}'
+        executable: /bin/bash
+      register: _esp_meta_facts
       changed_when: false
       when: esp_backend == 'lvm'
 
-    - name: "RAID10 (lvm) | assert the thin pool's METADATA is mirrored, not linear on one disk"
-      # A linear tmeta means one disk can destroy a raid10 pool: array intact,
-      # metadata gone, pool unactivatable in any mode. It must be raid1 with its two
-      # legs on DIFFERENT PVs — they are a mirror pair like any other.
-      vars:
-        _esp_meta_rows: >-
-          {{ _esp_lvs_meta.stdout_lines | map('replace', '[', '')
-             | map('replace', ']', '') | map('trim') | list }}
-        _esp_meta_type: >-
-          {{ (_esp_meta_rows | select('search', '^' ~ encrypted_storage_pool_lvm_thin_pool_name ~ '_tmeta +')
-              | list | first | default('')).split()[1] | default('') }}
-        _esp_meta_leg_pvs: >-
-          {{ _esp_meta_rows | select('search', '_tmeta_rimage_')
-             | map('split') | map('last') | map('regex_replace', '\(.*$', '') | list }}
+    - name: "RAID10 (lvm) | assert the thin pool's METADATA is mirrored across two distinct PVs"
+      # A linear tmeta means ONE disk can destroy a raid10 pool: array intact, metadata
+      # gone, pool unactivatable in any mode. The two legs are a mirror pair like any
+      # other, so they must also not sit on the same PV.
       ansible.builtin.assert:
         that:
-          - _esp_meta_type == 'raid1'
-          - (_esp_meta_leg_pvs | length) == 2
-          - (_esp_meta_leg_pvs | unique | length) == 2
+          - "'segtype=raid1' in _esp_meta_facts.stdout"
+          - "'legs=2' in _esp_meta_facts.stdout"
+          - "'distinct_pvs=2' in _esp_meta_facts.stdout"
         fail_msg: >-
-          thin-pool metadata is '{{ _esp_meta_type }}' on legs {{ _esp_meta_leg_pvs }} —
-          expected raid1 across two distinct PVs. Layout: {{ _esp_lvs_meta.stdout }}
+          expected the thin-pool metadata to be raid1 with 2 legs on 2 distinct PVs;
+          got: {{ _esp_meta_facts.stdout_lines | default([]) | join(', ') }}
         success_msg: >-
-          thin-pool metadata is raid1 across two distinct PVs ({{ _esp_meta_leg_pvs | join(', ') }}).
+          thin-pool metadata is mirrored across two distinct PVs
+          ({{ _esp_meta_facts.stdout_lines | default([]) | join(', ') }}).
       when: esp_backend == 'lvm'
 
     - name: "Assert real I/O on the pool survives the reboot (write + read back)"
