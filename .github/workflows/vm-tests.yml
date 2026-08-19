@@ -8,15 +8,12 @@ name: vm-tests
 
 on:
   workflow_dispatch:
+  # NO `paths:` filter, deliberately. `molecule vm (btrfs, libvirt/KVM)` and
+  # `molecule vm (lvm, libvirt/KVM)` are REQUIRED checks on main, and a workflow
+  # skipped by path filtering never reports its checks — so a PR touching only
+  # README.md, meta/, files/ or scripts/ would wait forever on a check that can never
+  # arrive. The workflow always runs; the expensive steps are gated instead.
   pull_request:
-    paths:
-      - 'tasks/**'
-      - 'templates/**'
-      - 'defaults/**'
-      - 'handlers/**'
-      - 'molecule/**'
-      - 'requirements.yml'
-      - '.github/workflows/vm-tests.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -41,8 +38,26 @@ jobs:
         backend: [btrfs, lvm]
     steps:
       - uses: actions/checkout@v5
+        with:
+          # full history: the gate below diffs against the PR's merge base
+          fetch-depth: 0
+
+      - name: Are the VM tests needed for this change?
+        id: gate
+        # Gates the STEPS, not the job: every matrix leg keeps reporting under its own
+        # name, so branch protection sees a real result either way and nothing depends
+        # on skipped-counts-as-success. Deny by default — see the script's header.
+        run: |
+          needed=$(bash tests/ci/vm-tests-needed.sh)
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+          {
+            echo "### ${{ matrix.scenario }} / ${{ matrix.backend }}: \`needed=$needed\`"
+            echo ""
+            echo "Deny-by-default: skipped only when every changed file is inert (markdown, .gitignore)."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enable unprivileged access to /dev/kvm
+        if: steps.gate.outputs.needed == 'true'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -51,6 +66,7 @@ jobs:
           ls -l /dev/kvm
 
       - name: Install libvirt/KVM + Vagrant + vagrant-libvirt
+        if: steps.gate.outputs.needed == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -67,6 +83,7 @@ jobs:
           vagrant plugin install vagrant-libvirt
 
       - name: Grant the runner rootless libvirt access
+        if: steps.gate.outputs.needed == 'true'
         run: |
           sudo systemctl enable --now libvirtd
           sudo usermod -aG libvirt,kvm "$USER"
@@ -74,22 +91,26 @@ jobs:
           sudo chmod 0666 /dev/kvm || true
 
       - uses: actions/setup-python@v6
+        if: steps.gate.outputs.needed == 'true'
         with:
           python-version: "3.12"
 
       - name: Install Molecule (Vagrant driver) + Ansible
+        if: steps.gate.outputs.needed == 'true'
         run: |
           python -m pip install --upgrade \
             molecule 'molecule-plugins[vagrant]' python-vagrant ansible
           ansible-galaxy collection install ansible.posix community.general
 
       - name: Install clevis_encryption into the scenario roles dir
+        if: steps.gate.outputs.needed == 'true'
         # The molecule converge composes clevis_encryption (NBDE); install the
         # pinned version (requirements.yml) next to the committed self-symlink so
         # molecule's ANSIBLE_ROLES_PATH resolves both roles.
         run: ansible-galaxy role install -r requirements.yml -p molecule/${{ matrix.scenario }}/roles
 
       - name: "molecule test -s ${{ matrix.scenario }} (backend=${{ matrix.backend }})"
+        if: steps.gate.outputs.needed == 'true'
         env:
           LIBVIRT_DEFAULT_URI: qemu:///system
           ESP_BACKEND: ${{ matrix.backend }}
