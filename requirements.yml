@@ -7,7 +7,7 @@ roles:
   - src: https://github.com/alc-kit/clevis-encryption-role.git
     name: clevis_encryption
     scm: git
-    version: v2.0.2
+    version: v2.1.1
 
 collections:
   - name: ansible.posix
