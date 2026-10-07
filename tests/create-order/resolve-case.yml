@@ -1,0 +1,12 @@
+---
+# tasks/resolve-disks.yml with an explicit (deprecated) member list; no host access.
+- name: "Resolve disks case"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: "Resolve"
+      ansible.builtin.include_tasks: ../../tasks/resolve-disks.yml
+    - name: "Emit the result for run.sh"
+      ansible.builtin.debug:
+        msg: "RESOLVED={{ encrypted_storage_pool_devices_resolved | join(',') }}"

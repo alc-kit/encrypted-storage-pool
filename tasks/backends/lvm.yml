@@ -33,9 +33,43 @@
       failed_when: false
       check_mode: false
 
+    # A VG with no `data` LV is a pool a previous run stopped building half-way
+    # (before v1.0.5 a refused device order did exactly that: the order was checked
+    # AFTER pvcreate/vgcreate). The create block below is skipped whenever the VG
+    # exists, so without this the role would skip creation on every later run and
+    # fail only at the mount, far from the cause. Refuse here, naming it.
+    - name: "LVM | does the existing VG carry its data LV?"
+      ansible.builtin.command: "lvs {{ encrypted_storage_pool_name }}/data"
+      register: encrypted_storage_pool_data_lv
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: encrypted_storage_pool_vg_exists.rc == 0
+
+    - name: "LVM | REFUSE a half-built pool (VG present, data LV missing)"
+      ansible.builtin.assert:
+        that: encrypted_storage_pool_data_lv.rc == 0
+        fail_msg: >-
+          Volume group {{ encrypted_storage_pool_name }} exists but has no `data` LV —
+          an earlier run stopped half-way through building this pool. Nothing was
+          changed. Inspect it (`vgs {{ encrypted_storage_pool_name }}`, `lvs -a
+          {{ encrypted_storage_pool_name }}`); if it holds no data, remove it
+          (`vgremove {{ encrypted_storage_pool_name }}`, then `pvremove` its PVs) and
+          re-run, which rebuilds it from the crypttab members.
+        quiet: true
+      when: encrypted_storage_pool_vg_exists.rc == 0
+
     - name: "LVM | create PVs + VG + LV + filesystem"
       when: encrypted_storage_pool_vg_exists.rc != 0
       block:
+        # FIRST, before anything is written to a disk: the caller's device order
+        # must name exactly this pool's members. Checked after pvcreate/vgcreate
+        # (until v1.0.5), a refused order left a VG behind and every later run
+        # skipped creation; checked here, a refusal leaves the disks untouched.
+        # lvm-device-order.yml is pure (no commands), so it can run this early.
+        - name: "LVM | check the device order and prepare the explicit PV list"
+          ansible.builtin.include_tasks: lvm-device-order.yml
+
         - name: "LVM | pvcreate the crypt-* members"
           ansible.builtin.command: "pvcreate -f /dev/mapper/crypt-{{ item }}"
           loop: "{{ encrypted_storage_pool_devices_resolved }}"
@@ -48,9 +82,6 @@
             vgcreate {{ encrypted_storage_pool_name }}
             {{ encrypted_storage_pool_devices_resolved | map('regex_replace', '^', '/dev/mapper/crypt-') | join(' ') }}
           changed_when: true
-
-        - name: "LVM | prepare the explicit PV list (pins raid image placement)"
-          ansible.builtin.include_tasks: lvm-device-order.yml
 
         - name: "LVM | compute the topology's RAID geometry for lvcreate"
           # mirror -> raid1 (-m1, one redundant copy); stripe -> striped across all
