@@ -68,6 +68,12 @@ caller did not choose, and ignoring it would silently discard a safety decision
 while leaving a pool that looks deliberate. Empty (the default) keeps the previous
 behaviour — LVM allocates, and the pairing is arbitrary.
 
+The order is checked **before anything is written to a disk** (since v1.0.5). Until
+then it was checked after `pvcreate`/`vgcreate`, so a refused order left a volume group
+behind; because creation runs only when the VG is absent, every later run skipped it.
+A VG that exists **without** its `data` LV — that half-built state — is now refused by
+name, with how to clear it, instead of failing later at the mount.
+
 Applies to the thick data LV and to the thin pool's data LV (the raid10 one). The
 `raid10` Molecule scenario imposes a *reversed* order and asserts the as-built
 image→PV mapping follows it, so a silently ignored order fails CI.
@@ -172,7 +178,7 @@ automatically. The btrfs backend ignores the thin variables.
 | `encrypted_storage_pool_name` | `data` | btrfs LABEL / LVM volume-group name. |
 | `encrypted_storage_pool_topology` | `mirror` | `mirror`, `stripe`, or `raid10` (raid10 needs ≥4 even disks). |
 | `encrypted_storage_pool_mountpoint` | `/srv/{{ name }}` | Mount point (fstab noauto). |
-| `encrypted_storage_pool_devices` | *(derived)* | Bare disk names (e.g. `[vdb, vdc]`). Unset → derived from `crypt-*` in `/etc/crypttab`. |
+| `encrypted_storage_pool_devices` | *(derived)* | **Deprecated** — leave unset: members are derived from the `crypt-*` entries in `/etc/crypttab`. If set, each entry names a LUKS mapper by its UUID (`<uuid>`, `crypt-<uuid>` or `/dev/mapper/crypt-<uuid>` — all normalised since v1.0.5); never a bare device node such as `vdb`. |
 | `encrypted_storage_pool_ensure` | `true` | Create/assemble the pool on every run. |
 | `encrypted_storage_pool_install_packages` | `true` | Install `btrfs-progs` / `lvm2` (+ `thin-provisioning-tools` when thin). |
 | `encrypted_storage_pool_destroy_existing` | `false` | **Destructive.** Destroy an existing pool first. |

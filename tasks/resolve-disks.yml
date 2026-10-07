@@ -11,13 +11,21 @@
   ansible.builtin.debug:
     msg: >-
       encrypted_storage_pool_devices is DEPRECATED — members are derived from the
-      crypt-* entries in /etc/crypttab. Unset it. If kept, entries MUST be full
-      mapper names (crypt-<uuid>), never bare device nodes.
+      crypt-* entries in /etc/crypttab. Unset it. If kept, each entry names a LUKS
+      mapper by its UUID — `<uuid>`, `crypt-<uuid>` and `/dev/mapper/crypt-<uuid>` are
+      all accepted — never a bare device node such as vdb.
   when: encrypted_storage_pool_devices is defined
 
 - name: "Resolve disks | use the explicit list if provided (deprecated)"
   ansible.builtin.set_fact:
-    encrypted_storage_pool_devices_resolved: "{{ encrypted_storage_pool_devices }}"
+    # The backends prefix `crypt-` themselves (/dev/mapper/crypt-<item>), so the
+    # members are held as the bare UUID. Accept every spelling and normalise: the
+    # old message asked for `crypt-<uuid>`, which became crypt-crypt-<uuid>.
+    encrypted_storage_pool_devices_resolved: >-
+      {{ encrypted_storage_pool_devices
+         | map('regex_replace', '^/dev/mapper/', '')
+         | map('regex_replace', '^crypt-', '')
+         | list }}
   when: encrypted_storage_pool_devices is defined
 
 - name: "Resolve disks | derive from /etc/crypttab crypt-* entries"

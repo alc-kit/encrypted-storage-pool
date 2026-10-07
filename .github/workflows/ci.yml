@@ -49,6 +49,8 @@ jobs:
 
       - name: Device-free explicit PV-order tests
         run: bash tests/device-order/run.sh
+      - name: Create path — order checked before pvcreate, half-built pool refused, members normalised
+        run: bash tests/create-order/run.sh
 
       - name: Device-free thin-pool metadata redundancy tests
         run: bash tests/thin-metadata/run.sh
