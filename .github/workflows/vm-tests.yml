@@ -98,8 +98,14 @@ jobs:
       - name: Install Molecule (Vagrant driver) + Ansible
         if: steps.gate.outputs.needed == 'true'
         run: |
-          python -m pip install --upgrade \
-            molecule 'molecule-plugins[vagrant]' python-vagrant ansible
+          # Pinned to the last versions the suite passed with (2026-10-07). molecule
+          # 26.10.0 / molecule-plugins 26.10.12 (2026-10-12) moved the vagrant driver
+          # onto the community.vagrant collection and every scenario failed in
+          # create/destroy ("couldn't resolve module/action 'community.vagrant.vagrant'")
+          # before the role ran. Bump on purpose, with a green run.
+          python -m pip install \
+            molecule==26.9.0 'molecule-plugins[vagrant]==26.9.28' ansible-compat==26.9.0 \
+            python-vagrant==1.0.0 ansible==14.5.0
           ansible-galaxy collection install ansible.posix community.general
 
       - name: Install clevis_encryption into the scenario roles dir
