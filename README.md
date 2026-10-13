@@ -68,15 +68,19 @@ caller did not choose, and ignoring it would silently discard a safety decision
 while leaving a pool that looks deliberate. Empty (the default) keeps the previous
 behaviour — LVM allocates, and the pairing is arbitrary.
 
-The order is checked **before anything is written to a disk** (since v1.0.5). Until
-then it was checked after `pvcreate`/`vgcreate`, so a refused order left a volume group
-behind; because creation runs only when the VG is absent, every later run skipped it.
-A VG that exists **without** its `data` LV — that half-built state — is now refused by
-name, with how to clear it, instead of failing later at the mount.
+**lvm backend only** (the btrfs backend ignores it), and only when the pool is
+**created**: the order is applied inside the "VG does not exist yet" path, so an
+existing pool is never re-laid out. The order is checked **before anything is written
+to a disk** (since v1.0.5). Until then it was checked after `pvcreate`/`vgcreate`, so a
+refused order left a volume group behind; because creation runs only when the VG is
+absent, every later run skipped it. A VG that exists **without** its `data` LV — that
+half-built state — is now refused by name, with how to clear it, instead of failing
+later at the mount.
 
 Applies to the thick data LV and to the thin pool's data LV (the raid10 one). The
 `raid10` Molecule scenario imposes a *reversed* order and asserts the as-built
-image→PV mapping follows it, so a silently ignored order fails CI.
+image→PV mapping follows it, so a silently ignored order fails CI. (The `vm`
+scenario's lvm leg imposes the reversed order too, but does not assert placement.)
 
 ### Thin-pool metadata redundancy
 
@@ -105,7 +109,8 @@ Two consequences worth knowing:
   drift from LVM's own as pools grow.
 
 `encrypted_storage_pool_lvm_thin_meta_devices` names which member the **second** leg
-should land on; the existing leg stays where LVM put it. The two legs are a mirror pair
+should land on (the first entry that does not already carry the metadata wins); the
+existing leg stays where LVM put it. The two legs are a mirror pair
 like any other, so they should not share a controller or enclosure — that list is the hook
 for fault-domain-aware placement. Left empty, LVM allocates the leg itself: still
 redundant, but not yet domain-aware. Naming *only* the PV that already carries the
@@ -140,8 +145,10 @@ data loss, and quietly activating a holed pool is worse than not starting.
 
 A degraded assembly logs a `WARNING … activating DEGRADED` line and tells the
 operator to replace and repair; the array does **not** self-heal. Set
-`encrypted_storage_pool_degraded_activation: false` to disable the escalation
-entirely (any missing device then keeps the pool down).
+`encrypted_storage_pool_degraded_activation: false` to drop step 3 only: a thin
+pool with any missing device then stays down, while steps 1–2 (and btrfs's
+`-o degraded` retry) still run, so a thick raid1/raid10 LV or a btrfs raid1 still
+comes up degraded.
 
 Mirror-pair note for `raid10`: LVM builds it as MD's *near* layout with 2 copies,
 so partners are **adjacent** images — `(0,1)`, `(2,3)`, `(4,5)`… The coverage gate
@@ -178,14 +185,14 @@ automatically. The btrfs backend ignores the thin variables.
 | `encrypted_storage_pool_name` | `data` | btrfs LABEL / LVM volume-group name. |
 | `encrypted_storage_pool_topology` | `mirror` | `mirror`, `stripe`, or `raid10` (raid10 needs ≥4 even disks). |
 | `encrypted_storage_pool_mountpoint` | `/srv/{{ name }}` | Mount point (fstab noauto). |
-| `encrypted_storage_pool_devices` | *(derived)* | **Deprecated** — leave unset: members are derived from the `crypt-*` entries in `/etc/crypttab`. If set, each entry names a LUKS mapper by its UUID (`<uuid>`, `crypt-<uuid>` or `/dev/mapper/crypt-<uuid>` — all normalised since v1.0.5); never a bare device node such as `vdb`. |
+| `encrypted_storage_pool_devices` | *(derived)* | **Deprecated** (a warning is logged when set) — leave unset: members are derived from the `crypt-*` entries in `/etc/crypttab` (the supported path). If set, each entry names a LUKS mapper by its UUID (`<uuid>`, `crypt-<uuid>` or `/dev/mapper/crypt-<uuid>` — all normalised since v1.0.5); never a bare device node such as `vdb`. |
 | `encrypted_storage_pool_ensure` | `true` | Create/assemble the pool on every run. |
 | `encrypted_storage_pool_install_packages` | `true` | Install `btrfs-progs` / `lvm2` (+ `thin-provisioning-tools` when thin). |
 | `encrypted_storage_pool_destroy_existing` | `false` | **Destructive.** Destroy an existing pool first. |
-| `encrypted_storage_pool_device_order` | `[]` | Ordered member list pinning which disks become mirror partners (see [Explicit member order](#explicit-member-order-which-disks-become-mirror-partners)). Must name exactly the pool's members. |
+| `encrypted_storage_pool_device_order` | `[]` | lvm backend, pool creation only. Ordered member list pinning which disks become mirror partners (see [Explicit member order](#explicit-member-order-which-disks-become-mirror-partners)). Bare UUID, `crypt-<uuid>` or full path. Must name exactly the pool's members. |
 | `encrypted_storage_pool_lvm_thin_meta_mirrored` | `true` | Convert the thin pool's metadata LV to a raid1 mirror so no single disk can destroy the pool (see [Thin-pool metadata redundancy](#thin-pool-metadata-redundancy)). |
-| `encrypted_storage_pool_lvm_thin_meta_devices` | `[]` | Member(s) the **second** metadata leg may land on (crypt-`<uuid>` name or full path). Empty → LVM chooses. The fault-domain placement hook. |
-| `encrypted_storage_pool_degraded_activation` | `true` | Come up DEGRADED when a device is missing but redundancy covers it (see [Degraded assembly](#degraded-assembly-missing-device-at-boot)). `false` → any missing device keeps the pool down. |
+| `encrypted_storage_pool_lvm_thin_meta_devices` | `[]` | Member(s) the **second** metadata leg may land on (bare UUID, `crypt-<uuid>` name or full path; first one not already carrying the metadata wins). Empty → LVM chooses. The fault-domain placement hook. |
+| `encrypted_storage_pool_degraded_activation` | `true` | lvm backend: allow the gated `--activationmode partial` step, so a thin pool comes up DEGRADED when a device is missing but redundancy covers it (see [Degraded assembly](#degraded-assembly-missing-device-at-boot)). `false` → a thin pool with a missing device stays down; the `degraded`-mode and btrfs `-o degraded` retries still run. |
 | `encrypted_storage_pool_lvm_thin` | `false` | lvm backend: build a thin pool + thin volume (see below). |
 | `encrypted_storage_pool_lvm_thin_pool_extents` | `95%FREE` | Extents for the thin pool data LV (leaves VG headroom for metadata). |
 | `encrypted_storage_pool_lvm_thin_pool_name` | `tpool` | Thin pool LV name (the volume stays `data`). |
@@ -194,14 +201,15 @@ automatically. The btrfs backend ignores the thin variables.
 ## Usage
 
 Runs after `clevis_encryption` (NBDE-only). Requires `clevis_encryption` **>= v1.2.0**
-(publishes `clevis-luks-unlocked.target` + supports `clevis_deploy_storage_units`).
+(publishes `clevis-luks-unlocked.target`); the test harness pins **v2.1.1**
+(`requirements.yml`). clevis 2.x is NBDE-only (its storage variables were removed
+in 2.0), so none need setting. On a 1.x clevis,
+also set `clevis_ensure_pool: false`, `clevis_install_zfs_packages: false` and
+`clevis_deploy_storage_units: false`.
 
 ```yaml
 roles:
   - role: clevis_encryption
-    clevis_ensure_pool: false
-    clevis_install_zfs_packages: false
-    clevis_deploy_storage_units: false
   - role: encrypted_storage_pool
     encrypted_storage_pool_backend: btrfs   # or lvm
     encrypted_storage_pool_topology: mirror
@@ -209,7 +217,7 @@ roles:
 
 ## Testing
 
-**Device-free (tier-0, no VMs).** Two suites, both wired into the `CI` workflow
+**Device-free (tier-0, no VMs).** Four suites, all wired into the `CI` workflow
 next to yamllint/ansible-lint:
 
 - `tests/topology/run.sh` runs the real `validate-topology.yml` guard against
@@ -240,12 +248,18 @@ round-trips, and a payload written pre-reboot survives byte-for-bit.
 | scenario | disks | topology | notes |
 |---|---|---|---|
 | `vm` | 4 × 2 GiB | `mirror` | the baseline boot test |
-| `raid10` | 10 × 1 GiB | `raid10` | multi-disk; lvm variant builds a raid10 **thin pool** |
+| `raid10` | 10 × 1 GiB | `raid10` | multi-disk; lvm variant builds a raid10 **thin pool** and asserts the thin-pool metadata is raid1 across two distinct PVs and the data LV's image→PV placement follows the imposed reversed order |
 
 The `vm-tests` CI workflow matrixes **both scenarios × both backends** (btrfs +
-lvm). Run locally with `./scripts/run.sh` (`vm`) or
-`MOLECULE_SCENARIO=raid10 ./scripts/run.sh`; pick the backend with `ESP_BACKEND`. No
-DKMS — btrfs/lvm are mainline.
+lvm); every leg always reports, and `tests/ci/vm-tests-needed.sh` skips the VM
+steps only when every changed file is inert (`*.md`, `.gitignore`). Run locally
+with `./scripts/run.sh` (`vm`) or `MOLECULE_SCENARIO=raid10 ./scripts/run.sh`; pick
+the backend with `ESP_BACKEND`. No DKMS — btrfs/lvm are mainline.
+
+A third scenario, `rename` (one VM, 2 × 1 GiB, btrfs, no clevis role), proves a live
+`dmsetup rename crypt-<node> → crypt-<uuid>` under a mounted pool is
+non-disruptive and the pool reassembles by fs-UUID. It is not in the CI matrix; run
+it with `MOLECULE_SCENARIO=rename ./scripts/run.sh`.
 
 ## License
 
